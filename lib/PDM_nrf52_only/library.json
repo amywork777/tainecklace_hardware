@@ -1,0 +1,15 @@
+{
+  "name": "PDM_nrf52_only",
+  "version": "1.0.0",
+  "frameworks": "arduino",
+  "platforms": ["nordicnrf52"],
+  "build": {
+    "srcFilter": [
+      "+<PDM.h>",
+      "+<nrf52/>",
+      "+<utility/>",
+      "-<rp2040/>",
+      "-<stm32/>"
+    ]
+  }
+}
