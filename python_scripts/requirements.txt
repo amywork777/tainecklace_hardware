@@ -1,0 +1,11 @@
+# BLE communication
+bleak>=0.21.0
+
+# Audio playback and visualization (optional but recommended)
+pygame>=2.5.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+
+# Speech recognition and transcription
+openai-whisper>=20230918
+torch>=2.0.0
