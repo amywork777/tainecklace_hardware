@@ -69,6 +69,11 @@ static uint32_t g_file_counter = 0;
 static char g_current_filename[MAX_FILENAME_LENGTH] = {0};
 static uint32_t g_last_status_update_ms = 0;
 
+// SD card health monitoring
+static uint32_t g_sd_write_errors = 0;
+static uint32_t g_sd_retry_count = 0;
+static uint32_t g_last_write_latency_ms = 0;
+
 // ========================================
 // Ring Buffer Utility Functions
 // ========================================
@@ -140,6 +145,11 @@ static void on_pdm_data_ready() {
 }
 
 // ========================================
+// Forward declarations
+// ========================================
+static bool write_to_sd_robust(const uint8_t* data, size_t size);
+
+// ========================================
 // SD Card Write Functions
 // ========================================
 
@@ -154,9 +164,9 @@ static bool flush_aligned_sectors() {
         return true;  // Nothing to flush
     }
     
-    size_t bytes_written = g_audio_file.write(g_sd_write_buffer, aligned_bytes);
-    if (bytes_written != aligned_bytes) {
-        Serial.println("ERROR: SD write failed");
+    // Use robust write function with retry logic
+    if (!write_to_sd_robust(g_sd_write_buffer, aligned_bytes)) {
+        Serial.println("ERROR: SD write failed after retries");
         g_is_recording = false;
         return false;
     }
@@ -224,6 +234,120 @@ static bool process_ring_buffer_data() {
 }
 
 // ========================================
+// SD Card Reliability Functions
+// ========================================
+
+/**
+ * Initialize SD card with retry logic and proper error handling
+ */
+static bool init_sd_card_robust() {
+    Serial.print("Initializing SD card on CS pin ");
+    Serial.print(SD_CS_PIN);
+    Serial.println("...");
+    
+    for (int attempt = 1; attempt <= SD_INIT_RETRY_COUNT; attempt++) {
+        Serial.print("SD init attempt ");
+        Serial.print(attempt);
+        Serial.print("/");
+        Serial.println(SD_INIT_RETRY_COUNT);
+        
+        // Try initialization with explicit SPI mode
+        if (g_sd_card.begin(SdSpiConfig(SD_CS_PIN, SHARED_SPI, SD_SCK_MHZ(SD_SPEED_MHZ)))) {
+            Serial.println("SD card initialized successfully");
+            
+            // Test SD card write capability
+            FsFile test_file;
+            if (test_file.open("AUDIO_TEST.TXT", O_WRITE | O_CREAT | O_TRUNC)) {
+                test_file.println("Audio system test");
+                test_file.close();
+                g_sd_card.remove("AUDIO_TEST.TXT");
+                Serial.println("SD card write test passed");
+                return true;
+            } else {
+                Serial.println("SD card write test failed, retrying...");
+            }
+        } else {
+            Serial.print("SD init failed with error: ");
+            Serial.println(g_sd_card.card()->errorCode());
+        }
+        
+        if (attempt < SD_INIT_RETRY_COUNT) {
+            Serial.print("Waiting ");
+            Serial.print(SD_RETRY_DELAY_MS);
+            Serial.println("ms before retry...");
+            delay(SD_RETRY_DELAY_MS);
+        }
+    }
+    
+    Serial.println("ERROR: SD card initialization failed after all retries!");
+    return false;
+}
+
+/**
+ * Check battery voltage to ensure stable SD operations
+ * Returns true if voltage is sufficient for SD writes
+ */
+static bool check_battery_voltage() {
+    // Read battery voltage using ADC
+    float battery_voltage = analogRead(A0) * 3.3 / 1024.0 * 2.0; // Assuming voltage divider
+    
+    // Minimum voltage for stable SD card operation (adjust based on your setup)
+    const float MIN_VOLTAGE = 3.2;
+    
+    if (battery_voltage < MIN_VOLTAGE) {
+        Serial.print("WARNING: Low battery voltage: ");
+        Serial.print(battery_voltage);
+        Serial.println("V - SD operations may be unstable");
+        return false;
+    }
+    
+    return true;
+}
+
+/**
+ * Write data to SD card with retry logic and error recovery
+ */
+static bool write_to_sd_robust(const uint8_t* data, size_t size) {
+    if (!check_battery_voltage()) {
+        Serial.println("Skipping SD write due to low voltage");
+        return false;
+    }
+    
+    uint32_t write_start_ms = millis();
+    
+    for (int attempt = 1; attempt <= SD_WRITE_RETRY_COUNT; attempt++) {
+        size_t bytes_written = g_audio_file.write(data, size);
+        
+        if (bytes_written == size) {
+            g_last_write_latency_ms = millis() - write_start_ms;
+            return true; // Success
+        }
+        
+        g_sd_write_errors++;
+        g_sd_retry_count++;
+        
+        Serial.print("SD write failed (attempt ");
+        Serial.print(attempt);
+        Serial.print("/");
+        Serial.print(SD_WRITE_RETRY_COUNT);
+        Serial.print("), wrote ");
+        Serial.print(bytes_written);
+        Serial.print("/");
+        Serial.print(size);
+        Serial.println(" bytes");
+        
+        if (attempt < SD_WRITE_RETRY_COUNT) {
+            // Try to sync and recover
+            g_audio_file.sync();
+            delay(SD_RETRY_DELAY_MS);
+        }
+    }
+    
+    Serial.println("ERROR: SD write failed after all retries");
+    return false;
+}
+
+// ========================================
 // File Management Functions
 // ========================================
 
@@ -266,8 +390,7 @@ static bool create_wav_file() {
     
     // Write WAV header (will be updated when recording stops)
     WAVHeader header;
-    size_t bytes_written = g_audio_file.write(&header, sizeof(header));
-    if (bytes_written != sizeof(header)) {
+    if (!write_to_sd_robust((const uint8_t*)&header, sizeof(header))) {
         Serial.println("ERROR: Failed to write WAV header");
         g_audio_file.close();
         return false;
@@ -286,7 +409,9 @@ static bool finalize_wav_file() {
     
     // Flush any remaining data
     if (g_sd_buffer_fill > 0) {
-        g_audio_file.write(g_sd_write_buffer, g_sd_buffer_fill);
+        if (!write_to_sd_robust(g_sd_write_buffer, g_sd_buffer_fill)) {
+            Serial.println("WARNING: Failed to write remaining buffer data");
+        }
         g_sd_buffer_fill = 0;
     }
     
@@ -301,8 +426,7 @@ static bool finalize_wav_file() {
         return false;
     }
     
-    size_t bytes_written = g_audio_file.write(&header, sizeof(header));
-    if (bytes_written != sizeof(header)) {
+    if (!write_to_sd_robust((const uint8_t*)&header, sizeof(header))) {
         Serial.println("ERROR: Failed to update WAV header");
         return false;
     }
@@ -331,27 +455,8 @@ static bool finalize_wav_file() {
 bool audio_init() {
     Serial.println("Initializing audio system...");
     
-    // Initialize SD card
-    Serial.print("Initializing SD card on CS pin ");
-    Serial.print(SD_CS_PIN);
-    Serial.println("...");
-    
-    if (!g_sd_card.begin(SdSpiConfig(SD_CS_PIN, SHARED_SPI, SD_SCK_MHZ(SD_SPEED_MHZ)))) {
-        Serial.print("ERROR: SD card initialization failed! Error code: ");
-        Serial.println(g_sd_card.card()->errorCode());
-        return false;
-    }
-    
-    // Test SD card write capability
-    Serial.println("Testing SD card write capability...");
-    FsFile test_file;
-    if (test_file.open("AUDIO_TEST.TXT", O_WRITE | O_CREAT | O_TRUNC)) {
-        test_file.println("Audio system test");
-        test_file.close();
-        g_sd_card.remove("AUDIO_TEST.TXT");
-        Serial.println("SD card write test passed");
-    } else {
-        Serial.println("ERROR: SD card write test failed!");
+    // Initialize SD card with robust retry logic
+    if (!init_sd_card_robust()) {
         return false;
     }
     
@@ -427,7 +532,12 @@ void audio_process() {
         Serial.print("s, Buffer: ");
         Serial.print(buffer_usage_percent);
         Serial.print("%, Overruns: ");
-        Serial.println(g_buffer_overruns);
+        Serial.print(g_buffer_overruns);
+        Serial.print(", SD Errors: ");
+        Serial.print(g_sd_write_errors);
+        Serial.print(", Write Latency: ");
+        Serial.print(g_last_write_latency_ms);
+        Serial.println("ms");
     }
 }
 
@@ -483,6 +593,18 @@ uint32_t audio_get_buffer_overruns() {
 
 uint32_t audio_get_recording_seconds() {
     return g_total_bytes_recorded / BYTES_PER_SECOND;
+}
+
+uint32_t audio_get_sd_write_errors() {
+    return g_sd_write_errors;
+}
+
+uint32_t audio_get_sd_retry_count() {
+    return g_sd_retry_count;
+}
+
+uint32_t audio_get_last_write_latency_ms() {
+    return g_last_write_latency_ms;
 }
 
 SdFs* audio_get_sd_instance() {

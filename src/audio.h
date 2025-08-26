@@ -26,5 +26,10 @@ uint32_t audio_get_bytes_recorded();   // Get total bytes recorded
 uint32_t audio_get_buffer_overruns();  // Get number of buffer overruns
 uint32_t audio_get_recording_seconds(); // Get recording duration in seconds
 
+// SD card health monitoring
+uint32_t audio_get_sd_write_errors();  // Get number of SD write errors
+uint32_t audio_get_sd_retry_count();   // Get number of SD write retries
+uint32_t audio_get_last_write_latency_ms(); // Get last write latency in ms
+
 // SD card access for other modules (e.g., BLE transfer)
 SdFs* audio_get_sd_instance();
