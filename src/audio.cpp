@@ -74,6 +74,7 @@ static uint32_t g_sd_write_errors = 0;
 static uint32_t g_sd_retry_count = 0;
 static uint32_t g_last_write_latency_ms = 0;
 
+
 // ========================================
 // Ring Buffer Utility Functions
 // ========================================
@@ -234,85 +235,91 @@ static bool process_ring_buffer_data() {
 }
 
 // ========================================
+// SD Card Hardware Diagnostics
+// ========================================
+
+/**
+ * Comprehensive SD card hardware diagnostics
+ * Tests pin states, power, and SPI connectivity
+ */
+static void diagnose_sd_hardware() {
+    Serial.println("\n=== SD CARD HARDWARE DIAGNOSTICS ===");
+    
+    // Test pin states and configuration
+    Serial.println("1. Pin Configuration Test:");
+    Serial.print("   CS Pin (D6): "); Serial.println(SD_CS_PIN);
+    Serial.print("   SCK Pin (D8): 8");
+    Serial.print("   MOSI Pin (D10): 10");
+    Serial.print("   MISO Pin (D9): 9");
+    Serial.println();
+    
+    // Test pin states
+    pinMode(SD_CS_PIN, OUTPUT);
+    digitalWrite(SD_CS_PIN, HIGH);
+    
+    Serial.print("   CS Pin State: "); Serial.println(digitalRead(SD_CS_PIN) ? "HIGH" : "LOW");
+    Serial.print("   MISO Pin State: "); Serial.println(digitalRead(9) ? "HIGH" : "LOW");
+    
+    // Test power supply to SD module
+    Serial.println("2. Power Supply Test:");
+    float vbat = analogRead(PIN_VBAT) * 2.0 * 3.3 / 1024.0;
+    Serial.print("   System Voltage: "); Serial.print(vbat); Serial.println("V");
+    Serial.print("   3V3 Available: "); Serial.println(vbat > 3.0 ? "YES" : "NO - CHECK POWER");
+    
+    // Test CS pin control
+    Serial.println("3. CS Pin Control Test:");
+    digitalWrite(SD_CS_PIN, LOW);
+    delay(10);
+    Serial.print("   CS LOW: "); Serial.println(digitalRead(SD_CS_PIN) ? "FAILED" : "OK");
+    digitalWrite(SD_CS_PIN, HIGH);
+    delay(10);
+    Serial.print("   CS HIGH: "); Serial.println(digitalRead(SD_CS_PIN) ? "OK" : "FAILED");
+    
+    Serial.println("=== HARDWARE DIAGNOSTICS COMPLETE ===\n");
+}
+
+// ========================================
 // SD Card Reliability Functions
 // ========================================
 
 /**
- * Initialize SD card with retry logic and proper error handling
+ * Initialize SD card with fast, direct approach for production use
  */
 static bool init_sd_card_robust() {
-    Serial.print("Initializing SD card on CS pin ");
-    Serial.print(SD_CS_PIN);
-    Serial.println("...");
+    Serial.print("Initializing SD card at ");
+    Serial.print(SD_SPEED_MHZ);
+    Serial.println(" MHz...");
     
-    for (int attempt = 1; attempt <= SD_INIT_RETRY_COUNT; attempt++) {
-        Serial.print("SD init attempt ");
-        Serial.print(attempt);
-        Serial.print("/");
-        Serial.println(SD_INIT_RETRY_COUNT);
+    // Direct initialization at optimal speed
+    if (g_sd_card.begin(SdSpiConfig(SD_CS_PIN, SHARED_SPI, SD_SCK_MHZ(SD_SPEED_MHZ)))) {
+        Serial.println("✓ SD card initialized successfully");
         
-        // Try initialization with explicit SPI mode
-        if (g_sd_card.begin(SdSpiConfig(SD_CS_PIN, SHARED_SPI, SD_SCK_MHZ(SD_SPEED_MHZ)))) {
-            Serial.println("SD card initialized successfully");
-            
-            // Test SD card write capability
-            FsFile test_file;
-            if (test_file.open("AUDIO_TEST.TXT", O_WRITE | O_CREAT | O_TRUNC)) {
-                test_file.println("Audio system test");
-                test_file.close();
-                g_sd_card.remove("AUDIO_TEST.TXT");
-                Serial.println("SD card write test passed");
-                return true;
-            } else {
-                Serial.println("SD card write test failed, retrying...");
-            }
+        // Quick write test
+        FsFile test_file;
+        if (test_file.open("AUDIO_TEST.TXT", O_WRITE | O_CREAT | O_TRUNC)) {
+            test_file.println("Audio system test");
+            test_file.close();
+            g_sd_card.remove("AUDIO_TEST.TXT");
+            Serial.println("✓ SD card write test passed");
+            return true;
         } else {
-            Serial.print("SD init failed with error: ");
-            Serial.println(g_sd_card.card()->errorCode());
+            Serial.println("✗ SD card write test failed");
+            return false;
         }
-        
-        if (attempt < SD_INIT_RETRY_COUNT) {
-            Serial.print("Waiting ");
-            Serial.print(SD_RETRY_DELAY_MS);
-            Serial.println("ms before retry...");
-            delay(SD_RETRY_DELAY_MS);
-        }
-    }
-    
-    Serial.println("ERROR: SD card initialization failed after all retries!");
-    return false;
-}
-
-/**
- * Check battery voltage to ensure stable SD operations
- * Returns true if voltage is sufficient for SD writes
- */
-static bool check_battery_voltage() {
-    // Read battery voltage using ADC
-    float battery_voltage = analogRead(A0) * 3.3 / 1024.0 * 2.0; // Assuming voltage divider
-    
-    // Minimum voltage for stable SD card operation (adjust based on your setup)
-    const float MIN_VOLTAGE = 3.2;
-    
-    if (battery_voltage < MIN_VOLTAGE) {
-        Serial.print("WARNING: Low battery voltage: ");
-        Serial.print(battery_voltage);
-        Serial.println("V - SD operations may be unstable");
+    } else {
+        Serial.print("✗ SD card initialization failed (error ");
+        Serial.print(g_sd_card.card()->errorCode());
+        Serial.println(")");
+        Serial.println("Check: SD card inserted, FAT32 format, proper wiring");
         return false;
     }
-    
-    return true;
 }
+
 
 /**
  * Write data to SD card with retry logic and error recovery
  */
 static bool write_to_sd_robust(const uint8_t* data, size_t size) {
-    if (!check_battery_voltage()) {
-        Serial.println("Skipping SD write due to low voltage");
-        return false;
-    }
-    
     uint32_t write_start_ms = millis();
     
     for (int attempt = 1; attempt <= SD_WRITE_RETRY_COUNT; attempt++) {
@@ -320,6 +327,24 @@ static bool write_to_sd_robust(const uint8_t* data, size_t size) {
         
         if (bytes_written == size) {
             g_last_write_latency_ms = millis() - write_start_ms;
+            
+            // Log successful writes periodically (not every single write)
+            static uint32_t last_write_log = 0;
+            static uint32_t write_count = 0;
+            write_count++;
+            
+            if (millis() - last_write_log > 5000) { // Log every 5 seconds
+                Serial.print("SD write OK: ");
+                Serial.print(write_count);
+                Serial.print(" writes, last ");
+                Serial.print(size);
+                Serial.print(" bytes, ");
+                Serial.print(g_last_write_latency_ms);
+                Serial.println("ms");
+                last_write_log = millis();
+                write_count = 0;
+            }
+            
             return true; // Success
         }
         
@@ -378,14 +403,18 @@ static bool create_wav_file() {
     
     // Create new file
     if (!g_audio_file.open(g_current_filename, O_WRITE | O_CREAT | O_TRUNC)) {
-        Serial.print("ERROR: Failed to create file: ");
+        Serial.print("✗ Failed to create file: ");
         Serial.println(g_sd_card.sdErrorCode());
         return false;
     }
     
     // Pre-allocate space for better performance
     if (g_audio_file.preAllocate(PREALLOC_BYTES)) {
-        Serial.println("Pre-allocated file space");
+        Serial.print("✓ File created with ");
+        Serial.print(PREALLOC_SIZE_MB);
+        Serial.println("MB pre-allocation");
+    } else {
+        Serial.println("✓ File created (no pre-allocation)");
     }
     
     // Write WAV header (will be updated when recording stops)
@@ -609,4 +638,8 @@ uint32_t audio_get_last_write_latency_ms() {
 
 SdFs* audio_get_sd_instance() {
     return &g_sd_card;
+}
+
+void audio_diagnose_hardware() {
+    diagnose_sd_hardware();
 }

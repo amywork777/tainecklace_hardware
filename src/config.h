@@ -22,7 +22,7 @@ static_assert((RING_BUFFER_SIZE & (RING_BUFFER_SIZE - 1)) == 0, "Ring buffer siz
 
 // -------- SD Card Configuration --------
 constexpr int SD_CS_PIN = 6;    // XIAO Sense CS pin
-constexpr int SD_SPEED_MHZ = 10; // SD card speed (reduced from 25 for stability)
+constexpr int SD_SPEED_MHZ = 10; // SD card speed - optimal for XIAO nRF52840
 
 // SD reliability settings
 constexpr int SD_INIT_RETRY_COUNT = 3;    // Retries for SD initialization

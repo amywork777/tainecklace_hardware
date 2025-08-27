@@ -33,3 +33,6 @@ uint32_t audio_get_last_write_latency_ms(); // Get last write latency in ms
 
 // SD card access for other modules (e.g., BLE transfer)
 SdFs* audio_get_sd_instance();
+
+// Hardware diagnostics and validation
+void audio_diagnose_hardware();  // Run comprehensive hardware diagnostics
