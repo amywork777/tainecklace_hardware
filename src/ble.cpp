@@ -12,6 +12,7 @@ static volatile int g_credits = 0;
 static uint32_t g_seq = 0;
 static uint32_t g_file_pos = 0;  // Track position for resume
 static uint32_t g_bytes_sent = 0;  // Total bytes sent this session
+static bool g_is_advertising = false;  // Track advertising state
 
 static FsFile* g_file = nullptr;
 static uint32_t g_fileSize = 0;
@@ -51,6 +52,7 @@ static void onConnect(BLEDevice central){
   g_bytes_sent = 0;
   g_last_report_ms = millis();
   g_last_report_bytes = 0;
+  g_is_advertising = false;  // No longer advertising when connected
   
   // Reset file position to beginning for fresh connection
   // (Could be enhanced to support resume by having client send last received seq)
@@ -122,11 +124,13 @@ void ble_set_transfer_file(FsFile* f, uint32_t size, const char* name){
 }
 
 void ble_start_advertising(){
+  g_is_advertising = true;
   BLE.advertise();
   Serial.println("BLE: Advertising started");
 }
 
 void ble_stop_advertising(){
+  g_is_advertising = false;
   BLE.stopAdvertise();
   if (BLE.connected()) {
     BLE.disconnect();
@@ -135,6 +139,10 @@ void ble_stop_advertising(){
 
 bool ble_is_connected(){ 
   return BLE.connected(); 
+}
+
+bool ble_is_advertising(){
+  return g_is_advertising && !BLE.connected();
 }
 
 // Send packet format: [seq32|len16|crc16|payload<=236]

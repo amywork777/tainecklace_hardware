@@ -15,6 +15,7 @@
 typedef enum {
   LED_IDLE,          // Slow blink (ready/waiting)
   LED_RECORDING,     // Solid on (recording active)
+  LED_BLE_ADVERTISING, // Medium blink (BLE advertising)
   LED_TRANSFERRING,  // Fast blink (BLE transfer)
   LED_ERROR          // Quick flashes then off (error state)
 } LedStatus;

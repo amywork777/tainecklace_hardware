@@ -31,6 +31,8 @@ void update_system_status() {
     current_status = LED_RECORDING;
   } else if (ble_is_connected()) {
     current_status = LED_TRANSFERRING;
+  } else if (ble_is_advertising()) {
+    current_status = LED_BLE_ADVERTISING;
   } else {
     current_status = LED_IDLE;
   }
@@ -44,6 +46,9 @@ void update_system_status() {
         break;
       case LED_TRANSFERRING:
         Serial.println("BLE_TRANSFER");
+        break;
+      case LED_BLE_ADVERTISING:
+        Serial.println("BLE_ADVERTISING");
         break;
       case LED_IDLE:
         Serial.println("IDLE");
@@ -106,7 +111,8 @@ void setup(){
   Serial.println("💡 Simple: Switch position controls recording!");
   Serial.println("💡 Power efficient: <1% overhead during recording");
   Serial.println("=====================================");
-  Serial.println("Serial commands available: r, s, c, l, d, h, x");
+  Serial.println("Serial commands available: r, s, c, l, d, h, x, q, b, e/esc");
+  Serial.println("💠 Interrupt commands: q=force stop recording, b=stop BLE, e/ESC=emergency stop all");
   Serial.println("Ready for intuitive switch control...");
   Serial.flush();
 }
@@ -308,6 +314,54 @@ void loop(){
       } else {
         Serial.println("✗ Failed to open SD card root directory");
       }
+    } else if (cmd == 'q') {
+      // Force stop current recording
+      Serial.println("🛑 FORCE STOP: Stopping recording...");
+      if (audio_is_recording()) {
+        audio_stop_recording();
+        Serial.print("✓ Recording force-stopped: "); 
+        Serial.print(audio_get_last_filename());
+        Serial.print(" ("); Serial.print(audio_get_bytes_recorded()); Serial.print(" bytes, ");
+        Serial.print(audio_get_buffer_overruns()); Serial.println(" overruns)");
+        led_set_status(LED_IDLE);
+      } else {
+        Serial.println("  No recording active");
+      }
+    } else if (cmd == 27 || cmd == 'e') { // ESC key or 'e' for emergency stop
+      // Emergency stop all processes
+      Serial.println("🚨 EMERGENCY STOP: Halting all processes...");
+      
+      // Stop recording if active
+      if (audio_is_recording()) {
+        audio_stop_recording();
+        Serial.println("  ✓ Recording stopped");
+      }
+      
+      // Stop BLE advertising/transfer
+      if (ble_is_connected() || ble_is_advertising()) {
+        ble_stop_advertising();
+        Serial.println("  ✓ BLE stopped");
+      }
+      
+      // Reset LED to idle state
+      led_set_status(LED_IDLE);
+      Serial.println("🟢 All processes stopped - system idle");
+    } else if (cmd == 'b') {
+      // Force stop BLE transfer/advertising
+      Serial.println("🚫 BLE STOP: Stopping BLE operations...");
+      if (ble_is_connected()) {
+        Serial.println("  ✓ Disconnecting BLE client");
+      }
+      if (ble_is_advertising()) {
+        Serial.println("  ✓ Stopping BLE advertising");
+      }
+      if (ble_is_connected() || ble_is_advertising()) {
+        ble_stop_advertising();
+        led_set_status(LED_IDLE);
+        Serial.println("  ✓ BLE operations stopped");
+      } else {
+        Serial.println("  No BLE operations active");
+      }
     } else if (cmd == 'r' && audio_is_recording()) {
       Serial.println("✗ Already recording! Use 's' to stop first.");
     } else if (cmd == 's' && !audio_is_recording()) {
@@ -316,7 +370,7 @@ void loop(){
       Serial.println("✗ Stop recording first! Use 's' to stop.");
     } else {
       Serial.println("✗ Unknown command or invalid state");
-      Serial.println("Available commands: r=record, s=stop, c=BLE transfer, l=list files, d=delete all, h=hardware test, x=cleanup");
+      Serial.println("Available commands: r=record, s=stop, c=BLE transfer, l=list files, d=delete all, h=hardware test, x=cleanup, q=force stop, b=stop BLE, e/ESC=emergency stop");
     }
     Serial.println();
     Serial.flush();

@@ -17,6 +17,7 @@ bool ble_init();                           // Initialize BLE service and charact
 void ble_start_advertising();              // Start advertising for file transfer
 void ble_stop_advertising();               // Stop advertising and disconnect
 bool ble_is_connected();                   // Check if client is connected
+bool ble_is_advertising();                 // Check if currently advertising
 
 // File transfer functions
 void ble_set_transfer_file(FsFile* file, uint32_t file_size, const char* filename);

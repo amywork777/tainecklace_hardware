@@ -6,6 +6,7 @@
 
 // LED timing constants (in milliseconds)
 static const uint32_t LED_IDLE_INTERVAL = 500;        // Slow blink: 1Hz (500ms on/off)
+static const uint32_t LED_BLE_ADVERTISING_INTERVAL = 250; // Medium blink: 2Hz (250ms on/off)
 static const uint32_t LED_TRANSFERRING_INTERVAL = 100; // Fast blink: 5Hz (100ms on/off)
 static const uint32_t LED_ERROR_FLASH_INTERVAL = 150;  // Error flash timing
 static const uint32_t LED_ERROR_PAUSE_INTERVAL = 1000; // Pause between error sequences
@@ -69,6 +70,15 @@ void led_update() {
         case LED_RECORDING:
             // Solid on - indicates active recording
             digitalWrite(g_led_pin, HIGH);
+            break;
+            
+        case LED_BLE_ADVERTISING:
+            // Medium blink (2Hz) - indicates BLE advertising
+            if (current_time - g_last_update >= LED_BLE_ADVERTISING_INTERVAL) {
+                g_led_state = !g_led_state;
+                digitalWrite(g_led_pin, g_led_state);
+                g_last_update = current_time;
+            }
             break;
             
         case LED_TRANSFERRING:
