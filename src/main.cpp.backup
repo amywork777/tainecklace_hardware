@@ -21,15 +21,13 @@ struct ButtonState {
   bool long_press_triggered;
 };
 
-
-
 static ButtonState btn_record = {HIGH, HIGH, 0, 0, false};
 static ButtonState btn_transfer = {HIGH, HIGH, 0, 0, false};
 static ButtonState btn_files = {HIGH, HIGH, 0, 0, false};
 
 // Button timing constants
-const uint32_t DEBOUNCE_DELAY_MS = 30;     // Faster debounce
-const uint32_t LONG_PRESS_DELAY_MS = 3000; // 3 seconds for long press (more forgiving)
+const uint32_t DEBOUNCE_DELAY_MS = 50;
+const uint32_t LONG_PRESS_DELAY_MS = 2000;
 
 // LED status management
 enum LedStatus {
@@ -55,8 +53,6 @@ void init_buttons() {
   Serial.println("Buttons initialized on pins D0, D1, D2");
 }
 
-
-
 bool update_button_state(ButtonState* btn, int pin) {
   bool current_reading = digitalRead(pin);
   bool button_pressed = false;
@@ -67,32 +63,29 @@ bool update_button_state(ButtonState* btn, int pin) {
   }
   
   if ((millis() - btn->last_debounce_time) > DEBOUNCE_DELAY_MS) {
-    // Only update current_state if it has actually changed
     if (current_reading != btn->current_state) {
       btn->current_state = current_reading;
       
       // Button was just pressed (HIGH to LOW transition)
-      if (btn->current_state == LOW) {
+      if (!btn->current_state && btn->last_state) {
         btn->press_start_time = millis();
         btn->long_press_triggered = false;
       }
-      // Button was just released (LOW to HIGH transition)  
-      else if (btn->current_state == HIGH) {
+      // Button was just released (LOW to HIGH transition)
+      else if (btn->current_state && !btn->last_state) {
         uint32_t press_duration = millis() - btn->press_start_time;
         if (press_duration < LONG_PRESS_DELAY_MS && !btn->long_press_triggered) {
           button_pressed = true; // Short press detected
         }
-        // Reset the long press flag when button is released
-        btn->long_press_triggered = false;
       }
     }
     
     // Check for long press while button is still held
-    if (btn->current_state == LOW && !btn->long_press_triggered) {
+    if (!btn->current_state && !btn->long_press_triggered) {
       uint32_t press_duration = millis() - btn->press_start_time;
       if (press_duration >= LONG_PRESS_DELAY_MS) {
         btn->long_press_triggered = true;
-        button_pressed = true; // Long press detected
+        return true; // Long press detected
       }
     }
   }
@@ -193,11 +186,11 @@ void setup(){
 
   Serial.println();
   Serial.println("Commands (Serial or Buttons):");
-  Serial.println("  r / D0 short press = start recording");
-  Serial.println("  s / D0 long press = stop recording");
-  Serial.println("  c / D1 hold 3s = connect BLE transfer");
+  Serial.println("  r / D0 press = start/stop recording");
+  Serial.println("  s / D0 press = stop recording");
+  Serial.println("  c / D1 hold 2s = connect BLE transfer");
   Serial.println("  l / D2 press = list files");
-  Serial.println("  d / D2 hold 3s = delete all WAV files");
+  Serial.println("  d / D2 hold 2s = delete all WAV files");
   Serial.println("Ready for commands...");
   Serial.flush();
 }
@@ -207,82 +200,71 @@ void loop(){
   update_led_status();
   
   // Handle button presses
-  // Handle recording button (D0)
-  bool record_pressed = update_button_state(&btn_record, BTN_RECORD_PIN);
-  
-  if (record_pressed) {
-    if (btn_record.long_press_triggered) {
-      // Long press: Stop recording
-      if (audio_is_recording()) {
-        Serial.println("> Button: Stop recording (long press)");
-        audio_stop_recording();
-        Serial.print("✓ Recording stopped: "); 
-        Serial.print(audio_get_last_filename());
-        Serial.print(" ("); Serial.print(audio_get_bytes_recorded()); Serial.print(" bytes, ");
-        Serial.print(audio_get_buffer_overruns()); Serial.println(" overruns)");
-      } else {
-        Serial.println("> Button: Not recording");
-      }
+  if (update_button_state(&btn_record, BTN_RECORD_PIN)) {
+    // D0: Toggle recording (start if stopped, stop if recording)
+    if (audio_is_recording()) {
+      Serial.println("> Button: Stop recording");
+      audio_stop_recording();
+      Serial.print("✓ Recording stopped: "); 
+      Serial.print(audio_get_last_filename());
+      Serial.print(" ("); Serial.print(audio_get_bytes_recorded()); Serial.print(" bytes, ");
+      Serial.print(audio_get_buffer_overruns()); Serial.println(" overruns)");
     } else {
-      // Short press: Start recording
-      if (!audio_is_recording()) {
-        Serial.println("> Button: Start recording (short press)");
-        if (audio_start_recording()){
-          Serial.print("✓ Recording started: "); 
-          Serial.println(audio_get_last_filename());
-        } else {
-          Serial.println("✗ Recording start failed");
-          current_led_status = LED_ERROR;
-        }
+      Serial.println("> Button: Start recording");
+      if (audio_start_recording()){
+        Serial.print("✓ Recording started: "); 
+        Serial.println(audio_get_last_filename());
       } else {
-        Serial.println("> Button: Already recording (hold to stop)");
+        Serial.println("✗ Recording start failed");
+        current_led_status = LED_ERROR;
       }
     }
     Serial.println();
     Serial.flush();
   }
   
-  // Handle BLE transfer button (D1 - hold 2s)
-  bool transfer_pressed = update_button_state(&btn_transfer, BTN_TRANSFER_PIN);
-  
-  if (transfer_pressed) {
-    if (btn_transfer.long_press_triggered) {
-      // D1: Start BLE transfer (only works when not recording)
-      if (audio_is_recording()) {
-        Serial.println("> Button: Stop recording first! Cannot transfer while recording.");
+  if (update_button_state(&btn_transfer, BTN_TRANSFER_PIN)) {
+    // D1: Start BLE transfer (only works when not recording)
+    if (audio_is_recording()) {
+      Serial.println("> Button: Stop recording first! Cannot transfer while recording.");
+    } else {
+      Serial.println("> Button: Starting BLE transfer (2s hold)...");
+      const char* path = audio_get_last_filename();
+      if (!*path) { 
+        Serial.println("✗ No file to transfer");
+        current_led_status = LED_ERROR;
       } else {
-        Serial.println("> Button: Starting BLE transfer (2s hold)...");
-        const char* path = audio_get_last_filename();
-        if (!*path) { 
-          Serial.println("✗ No file to transfer");
-          current_led_status = LED_ERROR;
+        if (txFile.isOpen()) txFile.close();
+        
+        SdFs* sd = audio_get_sd_instance();
+        if (txFile.open(sd, path, O_READ)){
+          Serial.print("✓ BLE advertising: "); 
+          Serial.print(path); Serial.print(" (");
+          Serial.print(txFile.fileSize()); Serial.println(" bytes)");
+          ble_set_transfer_file(&txFile, (uint32_t)txFile.fileSize(), path);
+          ble_start_advertising();
+          Serial.println("  Waiting for BLE connection...");
         } else {
-          if (txFile.isOpen()) txFile.close();
-          
-          SdFs* sd = audio_get_sd_instance();
-          if (txFile.open(sd, path, O_READ)){
-            Serial.print("✓ BLE advertising: "); 
-            Serial.print(path); Serial.print(" (");
-            Serial.print(txFile.fileSize()); Serial.println(" bytes)");
-            ble_set_transfer_file(&txFile, (uint32_t)txFile.fileSize(), path);
-            ble_start_advertising();
-            Serial.println("  Waiting for BLE connection...");
-          } else {
-            Serial.println("✗ Failed to open file for transfer");
-            current_led_status = LED_ERROR;
-          }
+          Serial.println("✗ Failed to open file");
+          current_led_status = LED_ERROR;
         }
       }
-      Serial.println();
-      Serial.flush();
     }
+    Serial.println();
+    Serial.flush();
   }
   
   // Handle file management button
+  static bool files_long_press = false;
   bool files_pressed = update_button_state(&btn_files, BTN_FILES_PIN);
   
+  // Check if this was a long press
+  if (files_pressed && btn_files.long_press_triggered) {
+    files_long_press = true;
+  }
+  
   if (files_pressed) {
-    if (btn_files.long_press_triggered) {
+    if (files_long_press || btn_files.long_press_triggered) {
       // D2 long press: Delete all WAV files
       Serial.println("> Button: Delete all WAV files (2s hold)...");
       SdFs* sd = audio_get_sd_instance();
@@ -314,6 +296,7 @@ void loop(){
         Serial.println("✗ Failed to open SD card root directory");
         current_led_status = LED_ERROR;
       }
+      files_long_press = false;
     } else {
       // D2 short press: List files
       Serial.println("> Button: List files");
