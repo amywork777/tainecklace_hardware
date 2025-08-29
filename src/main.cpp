@@ -63,16 +63,17 @@ bool update_button_state(ButtonState* btn, int pin) {
   }
   
   if ((millis() - btn->last_debounce_time) > DEBOUNCE_DELAY_MS) {
+    // Only update current_state if it has actually changed
     if (current_reading != btn->current_state) {
       btn->current_state = current_reading;
       
       // Button was just pressed (HIGH to LOW transition)
-      if (!btn->current_state && btn->last_state) {
+      if (btn->current_state == LOW) {
         btn->press_start_time = millis();
         btn->long_press_triggered = false;
       }
-      // Button was just released (LOW to HIGH transition)
-      else if (btn->current_state && !btn->last_state) {
+      // Button was just released (LOW to HIGH transition)  
+      else if (btn->current_state == HIGH) {
         uint32_t press_duration = millis() - btn->press_start_time;
         if (press_duration < LONG_PRESS_DELAY_MS && !btn->long_press_triggered) {
           button_pressed = true; // Short press detected
@@ -83,11 +84,11 @@ bool update_button_state(ButtonState* btn, int pin) {
     }
     
     // Check for long press while button is still held
-    if (!btn->current_state && !btn->long_press_triggered) {
+    if (btn->current_state == LOW && !btn->long_press_triggered) {
       uint32_t press_duration = millis() - btn->press_start_time;
       if (press_duration >= LONG_PRESS_DELAY_MS) {
         btn->long_press_triggered = true;
-        return true; // Long press detected
+        button_pressed = true; // Long press detected
       }
     }
   }
