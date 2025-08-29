@@ -77,6 +77,8 @@ bool update_button_state(ButtonState* btn, int pin) {
         if (press_duration < LONG_PRESS_DELAY_MS && !btn->long_press_triggered) {
           button_pressed = true; // Short press detected
         }
+        // Reset the long press flag when button is released
+        btn->long_press_triggered = false;
       }
     }
     
@@ -255,16 +257,10 @@ void loop(){
   }
   
   // Handle file management button
-  static bool files_long_press = false;
   bool files_pressed = update_button_state(&btn_files, BTN_FILES_PIN);
   
-  // Check if this was a long press
-  if (files_pressed && btn_files.long_press_triggered) {
-    files_long_press = true;
-  }
-  
   if (files_pressed) {
-    if (files_long_press || btn_files.long_press_triggered) {
+    if (btn_files.long_press_triggered) {
       // D2 long press: Delete all WAV files
       Serial.println("> Button: Delete all WAV files (2s hold)...");
       SdFs* sd = audio_get_sd_instance();
@@ -296,7 +292,6 @@ void loop(){
         Serial.println("✗ Failed to open SD card root directory");
         current_led_status = LED_ERROR;
       }
-      files_long_press = false;
     } else {
       // D2 short press: List files
       Serial.println("> Button: List files");
