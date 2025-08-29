@@ -194,8 +194,8 @@ void setup(){
   Serial.println();
   Serial.println("Commands (Serial or Buttons):");
   Serial.println("  r / D0 short press = start recording");
-  Serial.println("  s / D0 long press = stop recording");
-  Serial.println("  c / D1 hold 3s = connect BLE transfer");
+  Serial.println("  s / D0 long press = stop recording + auto BLE");
+  Serial.println("  c / D1 hold 3s = manual BLE transfer");
   Serial.println("  l / D2 press = list files");
   Serial.println("  d / D2 hold 3s = delete all WAV files");
   Serial.println("Ready for commands...");
@@ -220,6 +220,28 @@ void loop(){
         Serial.print(audio_get_last_filename());
         Serial.print(" ("); Serial.print(audio_get_bytes_recorded()); Serial.print(" bytes, ");
         Serial.print(audio_get_buffer_overruns()); Serial.println(" overruns)");
+        
+        // Auto-start BLE transfer after stopping recording
+        const char* path = audio_get_last_filename();
+        if (*path) {
+          if (txFile.isOpen()) txFile.close();
+          
+          SdFs* sd = audio_get_sd_instance();
+          if (txFile.open(sd, path, O_READ)){
+            Serial.print("✓ Auto-starting BLE transfer: "); 
+            Serial.print(path); Serial.print(" (");
+            Serial.print(txFile.fileSize()); Serial.println(" bytes)");
+            ble_set_transfer_file(&txFile, (uint32_t)txFile.fileSize(), path);
+            ble_start_advertising();
+            Serial.println("  Waiting for BLE connection...");
+          } else {
+            Serial.println("✗ Failed to open file for transfer");
+            current_led_status = LED_ERROR;
+          }
+        } else {
+          Serial.println("✗ No file to transfer");
+          current_led_status = LED_ERROR;
+        }
       } else {
         Serial.println("> Button: Not recording");
       }
@@ -369,6 +391,26 @@ void loop(){
       Serial.print(audio_get_last_filename());
       Serial.print(" ("); Serial.print(audio_get_bytes_recorded()); Serial.print(" bytes, ");
       Serial.print(audio_get_buffer_overruns()); Serial.println(" overruns)");
+      
+      // Auto-start BLE transfer after stopping recording
+      const char* path = audio_get_last_filename();
+      if (*path) {
+        if (txFile.isOpen()) txFile.close();
+        
+        SdFs* sd = audio_get_sd_instance();
+        if (txFile.open(sd, path, O_READ)){
+          Serial.print("✓ Auto-starting BLE transfer: "); 
+          Serial.print(path); Serial.print(" (");
+          Serial.print(txFile.fileSize()); Serial.println(" bytes)");
+          ble_set_transfer_file(&txFile, (uint32_t)txFile.fileSize(), path);
+          ble_start_advertising();
+          Serial.println("  Waiting for BLE connection...");
+        } else {
+          Serial.println("✗ Failed to open file for transfer");
+        }
+      } else {
+        Serial.println("✗ No file to transfer");
+      }
     } else if (cmd=='c' && !audio_is_recording()){
       Serial.println("Starting BLE transfer...");
       const char* path = audio_get_last_filename();
