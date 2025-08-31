@@ -362,6 +362,28 @@ class XiaoAudioReceiver:
                 f.write(self.received_data)
             
             print(f"✓ File saved: {output_path} ({len(self.received_data):,} bytes)")
+            
+            # Auto-decode ADPCM files to WAV for convenience
+            if output_path.suffix.lower() == '.adpcm':
+                try:
+                    import subprocess
+                    decoder_script = output_path.parent / 'adpcm_decoder.py'
+                    if decoder_script.exists():
+                        print("Auto-decoding ADPCM to WAV...")
+                        result = subprocess.run([
+                            'python', str(decoder_script), str(output_path)
+                        ], capture_output=True, text=True, cwd=output_path.parent)
+                        if result.returncode == 0:
+                            wav_path = output_path.with_suffix('.wav')
+                            print(f"✓ Decoded to: {wav_path}")
+                        else:
+                            print(f"Note: Auto-decode failed. Error: {result.stderr}")
+                            print(f"Use 'python adpcm_decoder.py {output_path.name}' manually")
+                    else:
+                        print(f"Note: To play this file, use 'python adpcm_decoder.py {output_path}'")
+                except Exception:
+                    print(f"Note: To play this file, use 'python adpcm_decoder.py {output_path}'")
+            
             return True
             
         except Exception as e:

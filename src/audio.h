@@ -3,14 +3,15 @@
 #include <SdFat.h>
 
 /**
- * High-quality PCM audio recording system for XIAO nRF52840 Sense
+ * High-quality audio recording system for XIAO nRF52840 Sense
  * 
  * Features:
- * - 16kHz 16-bit mono PCM recording
+ * - 16kHz mono audio recording with optional ADPCM compression
+ * - Real-time ADPCM encoding for 4:1 compression ratio
  * - Efficient ring buffer with ISR-safe operations
- * - Proper WAV file format with correct headers
+ * - WAV format (uncompressed) or ADPCM format (compressed)
  * - SD card management with error handling
- * - BLE file transfer support
+ * - BLE file transfer support with faster transmission for compressed files
  */
 
 // Core audio functions

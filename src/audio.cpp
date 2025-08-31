@@ -1,5 +1,6 @@
 #include "config.h"
 #include "audio.h"
+#include "adpcm.h"
 #include <SdFat.h>
 #include <PDM.h>
 
@@ -20,7 +21,7 @@ constexpr size_t MAX_PDM_BYTES_PER_ISR = 512;
 constexpr uint32_t STATUS_UPDATE_INTERVAL_MS = 500;
 
 // ========================================
-// WAV File Format Structures
+// File Format Structures
 // ========================================
 
 struct __attribute__((packed)) WAVHeader {
@@ -60,6 +61,11 @@ static volatile uint32_t g_ring_read_pos = 0;   // Written by main loop
 // SD write buffer for efficient sector-aligned writes
 alignas(4) static uint8_t g_sd_write_buffer[SD_WRITE_BUFFER_SIZE];
 static size_t g_sd_buffer_fill = 0;
+
+// ADPCM compression state and buffers
+static ADPCMEncoder g_adpcm_encoder;
+alignas(4) static int16_t g_pcm_temp_buffer[256];  // Temp buffer for PCM samples
+alignas(4) static uint8_t g_adpcm_temp_buffer[128]; // Temp buffer for ADPCM data (half size)
 
 // Recording state
 static volatile bool g_is_recording = false;
@@ -172,13 +178,27 @@ static bool flush_aligned_sectors() {
 }
 
 /**
+ * Process PCM samples through ADPCM compression if enabled
+ */
+static uint32_t process_pcm_samples(const int16_t* pcm_samples, uint32_t sample_count, uint8_t* output_buffer) {
+    if (ENABLE_ADPCM_COMPRESSION) {
+        // Compress PCM to ADPCM (4:1 compression)
+        return g_adpcm_encoder.encode_samples(pcm_samples, sample_count, output_buffer);
+    } else {
+        // Copy PCM data directly
+        memcpy(output_buffer, pcm_samples, sample_count * sizeof(int16_t));
+        return sample_count * sizeof(int16_t);
+    }
+}
+
+/**
  * Transfer data from ring buffer to SD write buffer
- * Handles ring buffer wraparound and triggers SD writes when buffer is full
+ * Handles ring buffer wraparound, ADPCM compression, and triggers SD writes when buffer is full
  */
 static bool process_ring_buffer_data() {
     uint32_t available_bytes = ring_buffer_available();
     
-    while (available_bytes > 0) {
+    while (available_bytes >= sizeof(int16_t) * 2) {  // Process at least 2 samples for ADPCM
         // Check if SD write buffer has space
         size_t buffer_space = SD_WRITE_BUFFER_SIZE - g_sd_buffer_fill;
         if (buffer_space == 0) {
@@ -191,26 +211,58 @@ static bool process_ring_buffer_data() {
             }
         }
         
-        // Calculate how much data to transfer
-        uint32_t read_pos = g_ring_read_pos & RING_BUFFER_MASK;
-        uint32_t bytes_to_transfer = min(available_bytes, (uint32_t)buffer_space);
-        uint32_t bytes_until_end = RING_BUFFER_SIZE - read_pos;
-        uint32_t first_chunk = min(bytes_to_transfer, bytes_until_end);
+        // Calculate how many samples we can process
+        uint32_t samples_available = available_bytes / sizeof(int16_t);
+        uint32_t samples_to_process = min(samples_available, (uint32_t)(sizeof(g_pcm_temp_buffer) / sizeof(int16_t)));
         
-        // Copy first chunk (no wraparound)
-        memcpy(g_sd_write_buffer + g_sd_buffer_fill, &g_ring_buffer[read_pos], first_chunk);
-        
-        // Copy second chunk if wraparound occurred
-        if (bytes_to_transfer > first_chunk) {
-            uint32_t second_chunk = bytes_to_transfer - first_chunk;
-            memcpy(g_sd_write_buffer + g_sd_buffer_fill + first_chunk, &g_ring_buffer[0], second_chunk);
+        // Ensure even number of samples for ADPCM (which packs 2 samples per byte)
+        if (ENABLE_ADPCM_COMPRESSION && samples_to_process % 2 != 0) {
+            samples_to_process--;
         }
         
+        if (samples_to_process == 0) {
+            break;  // Not enough samples to process
+        }
+        
+        uint32_t bytes_to_read = samples_to_process * sizeof(int16_t);
+        
+        // Copy PCM data from ring buffer to temp buffer, handling wraparound
+        uint32_t read_pos = g_ring_read_pos & RING_BUFFER_MASK;
+        uint32_t bytes_until_end = RING_BUFFER_SIZE - read_pos;
+        
+        if (bytes_to_read <= bytes_until_end) {
+            // No wraparound needed
+            memcpy(g_pcm_temp_buffer, &g_ring_buffer[read_pos], bytes_to_read);
+        } else {
+            // Handle wraparound
+            memcpy(g_pcm_temp_buffer, &g_ring_buffer[read_pos], bytes_until_end);
+            memcpy((uint8_t*)g_pcm_temp_buffer + bytes_until_end, &g_ring_buffer[0], bytes_to_read - bytes_until_end);
+        }
+        
+        // Process PCM samples (compress if ADPCM enabled)
+        uint32_t output_bytes = process_pcm_samples(g_pcm_temp_buffer, samples_to_process, 
+                                                    ENABLE_ADPCM_COMPRESSION ? g_adpcm_temp_buffer : (uint8_t*)g_pcm_temp_buffer);
+        
+        // Check if output fits in SD write buffer
+        if (output_bytes > buffer_space) {
+            if (!flush_aligned_sectors()) {
+                return false;
+            }
+            buffer_space = SD_WRITE_BUFFER_SIZE - g_sd_buffer_fill;
+            if (output_bytes > buffer_space) {
+                break;  // Still no space, try next iteration
+            }
+        }
+        
+        // Copy processed data to SD write buffer
+        const uint8_t* source_data = ENABLE_ADPCM_COMPRESSION ? g_adpcm_temp_buffer : (uint8_t*)g_pcm_temp_buffer;
+        memcpy(g_sd_write_buffer + g_sd_buffer_fill, source_data, output_bytes);
+        
         // Update positions and counters
-        g_ring_read_pos += bytes_to_transfer;
-        g_sd_buffer_fill += bytes_to_transfer;
-        g_total_bytes_recorded += bytes_to_transfer;
-        available_bytes -= bytes_to_transfer;
+        g_ring_read_pos += bytes_to_read;
+        g_sd_buffer_fill += output_bytes;
+        g_total_bytes_recorded += output_bytes;
+        available_bytes -= bytes_to_read;
         
         // Flush if buffer is getting full
         if (g_sd_buffer_fill >= SD_SECTOR_SIZE) {
@@ -239,9 +291,9 @@ static void generate_next_filename() {
 }
 
 /**
- * Create new WAV file with proper header
+ * Create new audio file with proper header (WAV or ADPCM)
  */
-static bool create_wav_file() {
+static bool create_audio_file() {
     generate_next_filename();
     
     Serial.print("Creating audio file: ");
@@ -264,22 +316,42 @@ static bool create_wav_file() {
         Serial.println("Pre-allocated file space");
     }
     
-    // Write WAV header (will be updated when recording stops)
-    WAVHeader header;
-    size_t bytes_written = g_audio_file.write(&header, sizeof(header));
-    if (bytes_written != sizeof(header)) {
-        Serial.println("ERROR: Failed to write WAV header");
-        g_audio_file.close();
-        return false;
+    // Write appropriate header based on compression mode
+    if (ENABLE_ADPCM_COMPRESSION) {
+        // Write ADPCM header
+        ADPCMHeader header;
+        header.sample_rate = SAMPLE_RATE;
+        header.channels = CHANNELS;
+        header.bits_per_sample = ADPCM_BITS_PER_SAMPLE;
+        header.initial_sample = 0;           // Will be set by encoder
+        header.initial_step_index = 0;       // Will be set by encoder
+        
+        size_t bytes_written = g_audio_file.write(&header, sizeof(header));
+        if (bytes_written != sizeof(header)) {
+            Serial.println("ERROR: Failed to write ADPCM header");
+            g_audio_file.close();
+            return false;
+        }
+        Serial.println("ADPCM compression enabled (4:1 ratio)");
+    } else {
+        // Write WAV header (will be updated when recording stops)
+        WAVHeader header;
+        size_t bytes_written = g_audio_file.write(&header, sizeof(header));
+        if (bytes_written != sizeof(header)) {
+            Serial.println("ERROR: Failed to write WAV header");
+            g_audio_file.close();
+            return false;
+        }
+        Serial.println("PCM recording (uncompressed)");
     }
     
     return true;
 }
 
 /**
- * Finalize WAV file by updating header with actual data size
+ * Finalize audio file by updating header with actual data size
  */
-static bool finalize_wav_file() {
+static bool finalize_audio_file() {
     if (!g_audio_file.isOpen()) {
         return false;
     }
@@ -290,36 +362,76 @@ static bool finalize_wav_file() {
         g_sd_buffer_fill = 0;
     }
     
-    // Update WAV header with actual file size
-    WAVHeader header;
-    header.data_size = g_total_bytes_recorded;
-    header.file_size = 36 + g_total_bytes_recorded;
-    
-    // Seek to beginning and write updated header
-    if (!g_audio_file.seekSet(0)) {
-        Serial.println("ERROR: Failed to seek to file beginning");
-        return false;
-    }
-    
-    size_t bytes_written = g_audio_file.write(&header, sizeof(header));
-    if (bytes_written != sizeof(header)) {
-        Serial.println("ERROR: Failed to update WAV header");
-        return false;
-    }
-    
-    // Truncate file to actual size (removes pre-allocated unused space)
-    uint32_t final_file_size = sizeof(WAVHeader) + g_total_bytes_recorded;
-    if (!g_audio_file.truncate(final_file_size)) {
-        Serial.println("WARNING: Failed to truncate file to final size");
+    // Update header with actual file size based on format
+    if (ENABLE_ADPCM_COMPRESSION) {
+        // Update ADPCM header
+        ADPCMHeader header;
+        header.sample_rate = SAMPLE_RATE;
+        header.channels = CHANNELS;
+        header.bits_per_sample = ADPCM_BITS_PER_SAMPLE;
+        header.data_size = g_total_bytes_recorded;
+        header.total_samples = g_total_bytes_recorded * 2;  // 2 samples per byte in ADPCM
+        header.initial_sample = 0;      // Could save encoder state for perfect resume
+        header.initial_step_index = 0;
+        
+        // Seek to beginning and write updated header
+        if (!g_audio_file.seekSet(0)) {
+            Serial.println("ERROR: Failed to seek to file beginning");
+            return false;
+        }
+        
+        size_t bytes_written = g_audio_file.write(&header, sizeof(header));
+        if (bytes_written != sizeof(header)) {
+            Serial.println("ERROR: Failed to update ADPCM header");
+            return false;
+        }
+        
+        // Truncate file to actual size
+        uint32_t final_file_size = sizeof(ADPCMHeader) + g_total_bytes_recorded;
+        if (!g_audio_file.truncate(final_file_size)) {
+            Serial.println("WARNING: Failed to truncate file to final size");
+        }
+        
+        Serial.print("ADPCM recording finalized: ");
+        Serial.print(header.total_samples);
+        Serial.print(" samples, ");
+        Serial.print(g_total_bytes_recorded);
+        Serial.print(" bytes (");
+        float compression_ratio = adpcm_utils::compression_ratio(header.total_samples * 2, g_total_bytes_recorded);
+        Serial.print(compression_ratio, 1);
+        Serial.println("% compression)");
+    } else {
+        // Update WAV header with actual file size
+        WAVHeader header;
+        header.data_size = g_total_bytes_recorded;
+        header.file_size = 36 + g_total_bytes_recorded;
+        
+        // Seek to beginning and write updated header
+        if (!g_audio_file.seekSet(0)) {
+            Serial.println("ERROR: Failed to seek to file beginning");
+            return false;
+        }
+        
+        size_t bytes_written = g_audio_file.write(&header, sizeof(header));
+        if (bytes_written != sizeof(header)) {
+            Serial.println("ERROR: Failed to update WAV header");
+            return false;
+        }
+        
+        // Truncate file to actual size (removes pre-allocated unused space)
+        uint32_t final_file_size = sizeof(WAVHeader) + g_total_bytes_recorded;
+        if (!g_audio_file.truncate(final_file_size)) {
+            Serial.println("WARNING: Failed to truncate file to final size");
+        }
+        
+        Serial.print("WAV recording finalized: ");
+        Serial.print(g_total_bytes_recorded);
+        Serial.println(" bytes");
     }
     
     // Flush and close file
     g_audio_file.flush();
     g_audio_file.close();
-    
-    Serial.print("Recording finalized: ");
-    Serial.print(g_total_bytes_recorded);
-    Serial.println(" bytes");
     
     return true;
 }
@@ -389,8 +501,13 @@ bool audio_start_recording() {
     g_sd_buffer_fill = 0;
     g_last_status_update_ms = millis();
     
-    // Create new WAV file
-    if (!create_wav_file()) {
+    // Reset ADPCM encoder if compression is enabled
+    if (ENABLE_ADPCM_COMPRESSION) {
+        g_adpcm_encoder.reset();
+    }
+    
+    // Create new audio file
+    if (!create_audio_file()) {
         return false;
     }
     
@@ -443,9 +560,9 @@ void audio_stop_recording() {
     // Process any remaining data in ring buffer
     process_ring_buffer_data();
     
-    // Finalize WAV file
-    if (!finalize_wav_file()) {
-        Serial.println("ERROR: Failed to finalize WAV file");
+    // Finalize audio file
+    if (!finalize_audio_file()) {
+        Serial.println("ERROR: Failed to finalize audio file");
     }
     
     // Print final statistics
@@ -457,6 +574,9 @@ void audio_stop_recording() {
     Serial.print("s, ");
     Serial.print(g_total_bytes_recorded);
     Serial.print(" bytes");
+    if (ENABLE_ADPCM_COMPRESSION) {
+        Serial.print(" compressed");
+    }
     if (g_buffer_overruns > 0) {
         Serial.print(", ");
         Serial.print(g_buffer_overruns);

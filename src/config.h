@@ -9,8 +9,14 @@ constexpr uint16_t CHANNELS = 1;          // Mono recording
 constexpr uint16_t BITS_PER_SAMPLE = 16; // 16-bit PCM
 constexpr uint8_t PDM_GAIN = 60;          // PDM gain (0-127, adjust for voice levels)
 
+// -------- Compression Configuration --------
+constexpr bool ENABLE_ADPCM_COMPRESSION = true;  // Enable ADPCM 4:1 compression
+constexpr uint16_t ADPCM_BITS_PER_SAMPLE = 4;    // ADPCM compressed bits per sample
+
 // Calculated audio parameters
-constexpr uint32_t BYTES_PER_SECOND = SAMPLE_RATE * (BITS_PER_SAMPLE / 8) * CHANNELS;
+constexpr uint32_t BYTES_PER_SECOND = ENABLE_ADPCM_COMPRESSION ? 
+    (SAMPLE_RATE * ADPCM_BITS_PER_SAMPLE) / 8 * CHANNELS :  // ADPCM: 8KB/s
+    SAMPLE_RATE * (BITS_PER_SAMPLE / 8) * CHANNELS;         // PCM: 32KB/s
 constexpr uint16_t BLOCK_ALIGN = CHANNELS * (BITS_PER_SAMPLE / 8);
 
 // -------- Buffer Configuration --------
@@ -30,7 +36,7 @@ constexpr uint32_t PREALLOC_BYTES = PREALLOC_SIZE_MB * 1024 * 1024;
 
 // -------- File Naming --------
 constexpr const char* FILE_PREFIX = "REC_";
-constexpr const char* FILE_EXTENSION = ".WAV";
+constexpr const char* FILE_EXTENSION = ENABLE_ADPCM_COMPRESSION ? ".ADPCM" : ".WAV";
 constexpr size_t MAX_FILENAME_LENGTH = 32;
 
 // -------- BLE Configuration --------
