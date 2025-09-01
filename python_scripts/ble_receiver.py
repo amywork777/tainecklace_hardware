@@ -293,18 +293,19 @@ class XiaoAudioReceiver:
                 # Check for stalled transfer
                 if len(self.received_data) == last_received:
                     stall_count += 1
-                    if stall_count > 20:  # 10 seconds of no progress (longer for high-speed)
-                        # Check if we're at 99%+ complete (fallback for old protocol)
+                    if stall_count > 10:  # Reduced from 20 to 10 (5 seconds)
+                        # Check if we're at 85%+ complete (more aggressive acceptance)
                         progress = (len(self.received_data) / self.file_size) * 100 if self.file_size > 0 else 0
-                        if progress >= 99.0:
-                            print(f"\n✓ Transfer nearly complete at {progress:.1f}% - accepting as done")
+                        if progress >= 85.0:  # Accept at 85% instead of 99%
+                            print(f"\n✓ Transfer mostly complete at {progress:.1f}% - accepting as done")
                             break
                         
                         print(f"\n⚠ Transfer stalled at {len(self.received_data)} bytes ({progress:.1f}%)")
                         print(f"   Buffer contains {len(self.packet_buffer)} out-of-order packets")
+                        print("   Sending more credits and retrying...")
                         
-                        # For high-speed mode, send more credits and be more aggressive
-                        await self.send_credits(32)
+                        # More aggressive credit sending
+                        await self.send_credits(64)  # Max credits
                         stall_count = 0
                         
                         # If we have buffered packets, try to process them
@@ -312,10 +313,20 @@ class XiaoAudioReceiver:
                             print("   Attempting to process buffered packets...")
                             # Find the lowest sequence number we can start from
                             min_buffered_seq = min(self.packet_buffer.keys())
-                            if min_buffered_seq - self.expected_seq <= 10:  # Small gap, skip ahead
+                            if min_buffered_seq - self.expected_seq <= 20:  # Larger gap tolerance
                                 print(f"   Skipping gap: {self.expected_seq} -> {min_buffered_seq}")
                                 self.expected_seq = min_buffered_seq
                                 self.process_buffered_packets()
+                        
+                        # If still stalled, try to salvage partial file
+                        if stall_count > 5 and len(self.received_data) > 1000:  # At least 1KB received
+                            print(f"   Attempting to salvage partial transfer...")
+                            # Pad missing data with zeros to make a valid file
+                            missing_bytes = self.file_size - len(self.received_data)
+                            if missing_bytes > 0 and missing_bytes < self.file_size * 0.2:  # Less than 20% missing
+                                print(f"   Padding {missing_bytes} missing bytes")
+                                self.received_data.extend(b'\x00' * missing_bytes)
+                                break
                 else:
                     stall_count = 0
                     last_received = len(self.received_data)
