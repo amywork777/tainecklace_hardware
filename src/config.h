@@ -13,6 +13,10 @@ constexpr uint8_t PDM_GAIN = 60;          // PDM gain (0-127, adjust for voice l
 constexpr bool ENABLE_ADPCM_COMPRESSION = true;  // Enable ADPCM 4:1 compression
 constexpr uint16_t ADPCM_BITS_PER_SAMPLE = 4;    // ADPCM compressed bits per sample
 
+// -------- Streaming Configuration --------
+constexpr bool ENABLE_LIVE_STREAMING = true;     // Enable real-time audio streaming over BLE
+constexpr size_t STREAM_CHUNK_SIZE = 128;        // ADPCM bytes per BLE packet (256 samples)
+
 // Calculated audio parameters
 constexpr uint32_t BYTES_PER_SECOND = ENABLE_ADPCM_COMPRESSION ? 
     (SAMPLE_RATE * ADPCM_BITS_PER_SAMPLE) / 8 * CHANNELS :  // ADPCM: 8KB/s
@@ -40,7 +44,14 @@ constexpr const char* FILE_EXTENSION = ENABLE_ADPCM_COMPRESSION ? ".ADPCM" : ".W
 constexpr size_t MAX_FILENAME_LENGTH = 32;
 
 // -------- BLE Configuration --------
+// File transfer service (existing)
 #define BLE_SERVICE_UUID     "a3f9b7f0-52d1-4c7a-8f1c-7a1b9b2f0001"
 #define BLE_TX_DATA_UUID     "a3f9b7f0-52d1-4c7a-8f1c-7a1b9b2f0002" // notify, up to 244B
 #define BLE_RX_CREDITS_UUID  "a3f9b7f0-52d1-4c7a-8f1c-7a1b9b2f0003" // write w/o resp, 1B
 #define BLE_FILE_INFO_UUID   "a3f9b7f0-52d1-4c7a-8f1c-7a1b9b2f0004" // read: [u32 size][name...]
+
+// Live audio streaming service (new)
+#define BLE_AUDIO_SERVICE_UUID    "b3f9b7f0-52d1-4c7a-8f1c-7a1b9b2f0001"
+#define BLE_AUDIO_STREAM_UUID     "b3f9b7f0-52d1-4c7a-8f1c-7a1b9b2f0002" // notify, compressed audio chunks
+#define BLE_AUDIO_CONTROL_UUID    "b3f9b7f0-52d1-4c7a-8f1c-7a1b9b2f0003" // write: start/stop commands
+#define BLE_AUDIO_STATUS_UUID     "b3f9b7f0-52d1-4c7a-8f1c-7a1b9b2f0004" // read: streaming status

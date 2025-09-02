@@ -2,10 +2,17 @@
 #include "ble.h"
 #include <ArduinoBLE.h>
 
+// File transfer service (existing)
 static BLEService svc(BLE_SERVICE_UUID);
 static BLECharacteristic txData(BLE_TX_DATA_UUID, BLENotify, 244);
 static BLECharacteristic rxCred(BLE_RX_CREDITS_UUID, BLEWriteWithoutResponse, 1);
 static BLECharacteristic fileInfo(BLE_FILE_INFO_UUID, BLERead, 64);
+
+// Live audio streaming service (new)
+static BLEService audioSvc(BLE_AUDIO_SERVICE_UUID);
+static BLECharacteristic audioStream(BLE_AUDIO_STREAM_UUID, BLENotify, 244);
+static BLECharacteristic audioControl(BLE_AUDIO_CONTROL_UUID, BLEWriteWithoutResponse, 1);
+static BLECharacteristic audioStatus(BLE_AUDIO_STATUS_UUID, BLERead, 16);
 
 // Transfer state
 static volatile int g_credits = 0;
@@ -26,6 +33,12 @@ static uint8_t io_buffer[2048];  // Reduced from 4096
 static size_t buffer_pos = 0;
 static size_t buffer_size = 0;
 
+// Live streaming state
+static volatile bool g_streaming_connected = false;
+static volatile bool g_streaming_active = false;
+static uint32_t g_stream_seq = 0;
+static uint32_t g_stream_chunks_sent = 0;
+
 static uint16_t crc16_ccitt(const uint8_t* p, size_t n){
   uint16_t c = 0xFFFF;
   for (size_t i = 0; i < n; i++){ 
@@ -44,6 +57,30 @@ static void onCred(BLEDevice, BLECharacteristic chr){
   if (g_credits > 64) g_credits = 64; // clamp to prevent overflow
 }
 
+static void onAudioControl(BLEDevice device, BLECharacteristic chr) {
+  (void)device;
+  uint8_t command = 0;
+  chr.readValue(command);
+  
+  switch (command) {
+    case 1: // Start streaming
+      if (!g_streaming_active) {
+        g_streaming_active = true;
+        g_stream_seq = 0;
+        g_stream_chunks_sent = 0;
+        Serial.println("BLE Audio: Streaming started by client");
+      }
+      break;
+      
+    case 0: // Stop streaming
+      if (g_streaming_active) {
+        g_streaming_active = false;
+        Serial.println("BLE Audio: Streaming stopped by client");
+      }
+      break;
+  }
+}
+
 static void onConnect(BLEDevice central){
   (void)central; 
   g_seq = 0; 
@@ -59,7 +96,11 @@ static void onConnect(BLEDevice central){
     g_file->seekSet(0);
   }
   
-  Serial.println("BLE: Client connected");
+  // Handle streaming connection
+  g_streaming_connected = true;
+  g_streaming_active = false;  // Wait for explicit start command
+  
+  Serial.println("BLE: Client connected (file transfer and streaming available)");
 }
 
 static void onDisconnect(BLEDevice central){
@@ -79,6 +120,18 @@ static void onDisconnect(BLEDevice central){
       Serial.println("BLE: Transfer incomplete - client can reconnect to retry");
     }
   }
+  
+  // Handle streaming disconnection
+  if (g_streaming_connected) {
+    g_streaming_connected = false;
+    g_streaming_active = false;
+    
+    if (g_stream_chunks_sent > 0) {
+      Serial.print("BLE Audio: Disconnected after streaming ");
+      Serial.print(g_stream_chunks_sent);
+      Serial.println(" chunks");
+    }
+  }
 }
 
 bool ble_init(){
@@ -89,6 +142,7 @@ bool ble_init(){
   BLE.setDeviceName("XIAO-REC");
   BLE.setLocalName("XIAO-REC");
   
+  // File transfer service
   svc.addCharacteristic(txData);
   svc.addCharacteristic(rxCred);
   svc.addCharacteristic(fileInfo);
@@ -97,6 +151,28 @@ bool ble_init(){
   rxCred.setEventHandler(BLEWritten, onCred);
   BLE.setEventHandler(BLEConnected, onConnect);
   BLE.setEventHandler(BLEDisconnected, onDisconnect);
+  
+  // Initialize streaming service if enabled
+  if (ENABLE_LIVE_STREAMING) {
+    // Add streaming service
+    audioSvc.addCharacteristic(audioStream);
+    audioSvc.addCharacteristic(audioControl);
+    audioSvc.addCharacteristic(audioStatus);
+    BLE.addService(audioSvc);
+    
+    // Set up event handlers
+    audioControl.setEventHandler(BLEWritten, onAudioControl);
+    
+    // Initialize status characteristic
+    uint8_t status[16] = {0};
+    memcpy(status, &SAMPLE_RATE, 4);      // Sample rate
+    memcpy(status + 4, &CHANNELS, 2);     // Channels
+    memcpy(status + 6, &ADPCM_BITS_PER_SAMPLE, 2);  // Bits per sample
+    memcpy(status + 8, &STREAM_CHUNK_SIZE, 4);  // Chunk size
+    audioStatus.setValue(status, sizeof(status));
+    
+    Serial.println("BLE Audio: Streaming service initialized");
+  }
   
   return true;
 }
@@ -239,4 +315,38 @@ void ble_process_transfer(){
   }
   
   BLE.poll();
+}
+
+// ========================================
+// Live Audio Streaming Implementation
+// ========================================
+
+bool ble_streaming_is_connected() {
+  return g_streaming_connected;
+}
+
+void ble_streaming_send_chunk(const uint8_t* adpcm_data, size_t chunk_size) {
+  if (!g_streaming_active || !g_streaming_connected) {
+    return;  // Not ready to stream
+  }
+  
+  // Limit chunk size to BLE packet size minus header
+  if (chunk_size > 236) {
+    chunk_size = 236;
+  }
+  
+  // Build streaming packet: [seq32|timestamp32|chunk_size16|adpcm_data]
+  uint8_t packet[244];
+  uint32_t timestamp = millis();
+  uint16_t size16 = (uint16_t)chunk_size;
+  
+  memcpy(packet, &g_stream_seq, 4);
+  memcpy(packet + 4, &timestamp, 4);
+  memcpy(packet + 8, &size16, 2);
+  memcpy(packet + 10, adpcm_data, chunk_size);
+  
+  if (audioStream.setValue(packet, 10 + chunk_size)) {
+    g_stream_seq++;
+    g_stream_chunks_sent++;
+  }
 }

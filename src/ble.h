@@ -21,3 +21,7 @@ bool ble_is_connected();                   // Check if client is connected
 // File transfer functions
 void ble_set_transfer_file(FsFile* file, uint32_t file_size, const char* filename);
 void ble_process_transfer();               // Process file transfer (call in main loop)
+
+// Live audio streaming functions
+bool ble_streaming_is_connected();        // Check if streaming client is connected
+void ble_streaming_send_chunk(const uint8_t* adpcm_data, size_t chunk_size);  // Send audio chunk

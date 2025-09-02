@@ -1,6 +1,7 @@
 #include "config.h"
 #include "audio.h"
 #include "adpcm.h"
+#include "ble.h"
 #include <SdFat.h>
 #include <PDM.h>
 
@@ -74,6 +75,17 @@ static volatile uint32_t g_buffer_overruns = 0;
 static uint32_t g_file_counter = 0;
 static char g_current_filename[MAX_FILENAME_LENGTH] = {0};
 static uint32_t g_last_status_update_ms = 0;
+
+// Streaming state
+static volatile bool g_is_streaming = false;
+static ADPCMEncoder g_stream_adpcm_encoder;  // Separate encoder for streaming
+static uint8_t g_stream_buffer[STREAM_CHUNK_SIZE];
+static size_t g_stream_buffer_fill = 0;
+
+// ========================================
+// Forward Declarations
+// ========================================
+static void process_streaming_data();
 
 // ========================================
 // Ring Buffer Utility Functions
@@ -520,15 +532,18 @@ bool audio_start_recording() {
 }
 
 void audio_process() {
-    if (!g_is_recording) {
-        return;  // Nothing to do if not recording
+    // Process recording data
+    if (g_is_recording) {
+        if (!process_ring_buffer_data()) {
+            Serial.println("ERROR: Audio processing failed, stopping recording");
+            audio_stop_recording();
+            return;
+        }
     }
     
-    // Process ring buffer data
-    if (!process_ring_buffer_data()) {
-        Serial.println("ERROR: Audio processing failed, stopping recording");
-        audio_stop_recording();
-        return;
+    // Process streaming data (only if not recording to avoid conflicts)
+    if (ENABLE_LIVE_STREAMING && g_is_streaming && !g_is_recording) {
+        process_streaming_data();
     }
     
     // Print status updates periodically
@@ -607,4 +622,100 @@ uint32_t audio_get_recording_seconds() {
 
 SdFs* audio_get_sd_instance() {
     return &g_sd_card;
+}
+
+// ========================================
+// Live Audio Streaming Implementation
+// ========================================
+
+bool audio_start_streaming() {
+    if (g_is_streaming) {
+        Serial.println("ERROR: Already streaming!");
+        return false;
+    }
+    
+    if (!ENABLE_LIVE_STREAMING) {
+        Serial.println("ERROR: Live streaming is disabled in config");
+        return false;
+    }
+    
+    Serial.println("Starting audio streaming...");
+    
+    // Reset streaming state
+    g_stream_buffer_fill = 0;
+    
+    // Reset streaming ADPCM encoder
+    g_stream_adpcm_encoder.reset();
+    
+    // Start streaming
+    g_is_streaming = true;
+    
+    Serial.println("Audio streaming started");
+    return true;
+}
+
+void audio_stop_streaming() {
+    if (!g_is_streaming) {
+        Serial.println("WARNING: Not currently streaming");
+        return;
+    }
+    
+    Serial.println("Stopping audio streaming...");
+    g_is_streaming = false;
+    
+    // Send any remaining data in stream buffer
+    if (g_stream_buffer_fill > 0 && ble_streaming_is_connected()) {
+        ble_streaming_send_chunk(g_stream_buffer, g_stream_buffer_fill);
+        g_stream_buffer_fill = 0;
+    }
+    
+    Serial.println("Audio streaming stopped");
+}
+
+bool audio_is_streaming() {
+    return g_is_streaming;
+}
+
+// ========================================
+// Streaming Data Processing
+// ========================================
+
+static void process_streaming_data() {
+    if (!ble_streaming_is_connected()) {
+        return;  // No client connected
+    }
+    
+    uint32_t available_bytes = ring_buffer_available();
+    
+    // Process smaller chunks more frequently to reduce latency and clicking
+    while (available_bytes >= 256) {  // Process in 256-byte chunks (128 samples)
+        const uint32_t samples_to_process = 128;
+        const uint32_t bytes_to_read = samples_to_process * sizeof(int16_t);
+        
+        // Copy PCM data from ring buffer to temp buffer, handling wraparound
+        uint32_t read_pos = g_ring_read_pos & RING_BUFFER_MASK;
+        uint32_t bytes_until_end = RING_BUFFER_SIZE - read_pos;
+        
+        if (bytes_to_read <= bytes_until_end) {
+            // No wraparound needed
+            memcpy(g_pcm_temp_buffer, &g_ring_buffer[read_pos], bytes_to_read);
+        } else {
+            // Handle wraparound
+            memcpy(g_pcm_temp_buffer, &g_ring_buffer[read_pos], bytes_until_end);
+            memcpy((uint8_t*)g_pcm_temp_buffer + bytes_until_end, &g_ring_buffer[0], bytes_to_read - bytes_until_end);
+        }
+        
+        // Update ring buffer read position atomically
+        g_ring_read_pos += bytes_to_read;
+        available_bytes -= bytes_to_read;
+        
+        // Compress to ADPCM
+        uint8_t adpcm_chunk[64];  // 128 samples -> 64 bytes (4:1 compression)
+        uint32_t compressed_bytes = g_stream_adpcm_encoder.encode_samples(g_pcm_temp_buffer, samples_to_process, adpcm_chunk);
+        
+        // Send chunk immediately to reduce latency
+        if (compressed_bytes > 0) {
+            ble_streaming_send_chunk(adpcm_chunk, compressed_bytes);
+        }
+    }
 }

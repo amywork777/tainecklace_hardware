@@ -198,6 +198,9 @@ void setup(){
   Serial.println("  c / D1 hold 3s = manual BLE transfer");
   Serial.println("  l / D2 press = list files");
   Serial.println("  d / D2 hold 3s = delete all WAV files");
+  if (ENABLE_LIVE_STREAMING) {
+    Serial.println("  t = start/stop live streaming");
+  }
   Serial.println("Ready for commands...");
   Serial.flush();
 }
@@ -490,9 +493,29 @@ void loop(){
       Serial.println("✗ Not currently recording! Use 'r' to start.");
     } else if (cmd == 'c' && audio_is_recording()) {
       Serial.println("✗ Stop recording first! Use 's' to stop.");
+    } else if (cmd == 't' && ENABLE_LIVE_STREAMING) {
+      // Toggle streaming
+      if (audio_is_streaming()) {
+        Serial.println("Stopping live streaming...");
+        audio_stop_streaming();
+      } else {
+        Serial.println("Starting live streaming...");
+        if (audio_start_streaming()) {
+          Serial.println("✓ Live streaming started");
+          if (!ble_streaming_is_connected()) {
+            Serial.println("  No BLE client connected - connect with streaming client");
+          }
+        } else {
+          Serial.println("✗ Failed to start streaming");
+        }
+      }
     } else {
       Serial.println("✗ Unknown command or invalid state");
-      Serial.println("Available commands: r=record, s=stop, c=BLE transfer, l=list files, d=delete all");
+      String available_commands = "Available commands: r=record, s=stop, c=BLE transfer, l=list files, d=delete all";
+      if (ENABLE_LIVE_STREAMING) {
+        available_commands += ", t=toggle streaming";
+      }
+      Serial.println(available_commands);
     }
     Serial.println();
     Serial.flush();
