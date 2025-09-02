@@ -1,16 +1,21 @@
-#include <Arduino.h>
-#include <SdFat.h>
 #include "config.h"
 #include "audio.h"
 #include "ble.h"
+#include <SdFat.h>
 
-static FsFile txFile;
+// ========================================
+// LED Status Management
+// ========================================
 
-// Button pin definitions
-#define BTN_RECORD_PIN    D0    // Record/Stop toggle button
-#define BTN_TRANSFER_PIN  D1    // BLE transfer button (hold 2s)
-#define BTN_FILES_PIN     D2    // File management button (press=list, hold=delete)
-#define LED_PIN           LED_BUILTIN  // Status LED
+typedef enum {
+  LED_IDLE,
+  LED_RECORDING,
+  LED_TRANSFERRING,
+  LED_STREAMING,
+  LED_ERROR
+} LedStatus;
+
+static LedStatus current_led_status = LED_IDLE;
 
 // Button state management
 struct ButtonState {
@@ -21,53 +26,35 @@ struct ButtonState {
   bool long_press_triggered;
 };
 
-
-
 static ButtonState btn_record = {HIGH, HIGH, 0, 0, false};
-static ButtonState btn_transfer = {HIGH, HIGH, 0, 0, false};
-static ButtonState btn_files = {HIGH, HIGH, 0, 0, false};
+
+// Pin assignments
+constexpr int LED_PIN = LED_BUILTIN;
+constexpr int BTN_RECORD_PIN = D0;
 
 // Button timing constants
-const uint32_t DEBOUNCE_DELAY_MS = 30;     // Faster debounce
-const uint32_t LONG_PRESS_DELAY_MS = 3000; // 3 seconds for long press (more forgiving)
+constexpr uint32_t DEBOUNCE_DELAY_MS = 50;
+constexpr uint32_t LONG_PRESS_DELAY_MS = 2000;
 
-// LED status management
-enum LedStatus {
-  LED_IDLE,          // Slow blink (ready)
-  LED_RECORDING,     // Solid on
-  LED_TRANSFERRING,  // Fast blink
-  LED_ERROR          // 3 quick flashes
-};
+// File transfer
+static FsFile txFile;
 
-static LedStatus current_led_status = LED_IDLE;
-static uint32_t last_led_update = 0;
-static bool led_state = false;
-static uint8_t error_flash_count = 0;
-
-// Button helper functions
 void init_buttons() {
   pinMode(BTN_RECORD_PIN, INPUT_PULLUP);
-  pinMode(BTN_TRANSFER_PIN, INPUT_PULLUP);
-  pinMode(BTN_FILES_PIN, INPUT_PULLUP);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
-  
-  Serial.println("Buttons initialized on pins D0, D1, D2");
 }
-
-
 
 bool update_button_state(ButtonState* btn, int pin) {
   bool current_reading = digitalRead(pin);
   bool button_pressed = false;
   
-  // Handle debouncing
+  // Debounce logic
   if (current_reading != btn->last_state) {
     btn->last_debounce_time = millis();
   }
   
   if ((millis() - btn->last_debounce_time) > DEBOUNCE_DELAY_MS) {
-    // Only update current_state if it has actually changed
     if (current_reading != btn->current_state) {
       btn->current_state = current_reading;
       
@@ -102,48 +89,62 @@ bool update_button_state(ButtonState* btn, int pin) {
 }
 
 void update_led_status() {
+  static uint32_t last_led_update = 0;
+  static bool led_state = false;
+  static int flash_count = 0;
+  static int error_flash_count = 0;
+  
   uint32_t current_time = millis();
   
-  // Update LED status based on system state
+  // Determine current status priority (Recording > Streaming > Transferring > Idle)
   if (audio_is_recording()) {
     current_led_status = LED_RECORDING;
+  } else if (ENABLE_LIVE_STREAMING && audio_is_streaming()) {
+    current_led_status = LED_STREAMING;  
   } else if (ble_is_connected()) {
     current_led_status = LED_TRANSFERRING;
   } else {
     current_led_status = LED_IDLE;
   }
   
-  // Handle LED patterns
   switch (current_led_status) {
     case LED_IDLE:
-      // Slow blink (1Hz)
-      if (current_time - last_led_update >= 500) {
+      if (current_time - last_led_update >= 2000) {
         led_state = !led_state;
-        digitalWrite(LED_PIN, led_state);
+        digitalWrite(LED_PIN, led_state ? HIGH : LOW);
         last_led_update = current_time;
       }
       break;
       
     case LED_RECORDING:
-      // Solid on
+      // Flashing red pattern for recording (fast blink)
+      if (current_time - last_led_update >= 300) {
+        led_state = !led_state;
+        digitalWrite(LED_PIN, led_state ? HIGH : LOW);
+        last_led_update = current_time;
+      }
+      break;
+      
+    case LED_STREAMING:
+      // Solid ON during streaming
       digitalWrite(LED_PIN, HIGH);
       break;
       
     case LED_TRANSFERRING:
-      // Fast blink (5Hz)
-      if (current_time - last_led_update >= 100) {
+      // Fast blink during transfer
+      if (current_time - last_led_update >= 200) {
         led_state = !led_state;
-        digitalWrite(LED_PIN, led_state);
+        digitalWrite(LED_PIN, led_state ? HIGH : LOW);
         last_led_update = current_time;
       }
       break;
       
     case LED_ERROR:
-      // 3 quick flashes then off
+      // Triple flash pattern for errors
       if (current_time - last_led_update >= 150) {
-        if (error_flash_count < 6) { // 3 on/off cycles
+        if (error_flash_count < 6) {
           led_state = !led_state;
-          digitalWrite(LED_PIN, led_state);
+          digitalWrite(LED_PIN, led_state ? HIGH : LOW);
           error_flash_count++;
         } else {
           digitalWrite(LED_PIN, LOW);
@@ -187,21 +188,25 @@ void setup(){
   }
   Serial.println("OK");
   
+  // Always start advertising for instant connection
+  Serial.print("Starting BLE advertising... ");
+  ble_start_advertising();
+  Serial.println("OK");
+  
   Serial.print("Initializing buttons... ");
   init_buttons();
   Serial.println("OK");
 
   Serial.println();
-  Serial.println("Commands (Serial or Buttons):");
-  Serial.println("  r / D0 short press = start recording");
-  Serial.println("  s / D0 long press = stop recording + auto BLE");
-  Serial.println("  c / D1 hold 3s = manual BLE transfer");
-  Serial.println("  l / D2 press = list files");
-  Serial.println("  d / D2 hold 3s = delete all WAV files");
-  if (ENABLE_LIVE_STREAMING) {
-    Serial.println("  t = start/stop live streaming");
-  }
-  Serial.println("Ready for commands...");
+  Serial.println("=== SMART VOICE RECORDER ===");
+  Serial.println("🔵 BLE advertising active - ready for app connection");
+  Serial.println();
+  Serial.println("Button Behavior:");
+  Serial.println("  📱 App connected: D0 = Live streaming + real-time transcription");
+  Serial.println("  💾 App offline:   D0 = Record to SD card for later sync");
+  Serial.println();
+  Serial.println("Device automatically detects mode based on app connection.");
+  Serial.println("Ready to stream or record...");
   Serial.flush();
 }
 
@@ -214,313 +219,48 @@ void loop(){
   bool record_pressed = update_button_state(&btn_record, BTN_RECORD_PIN);
   
   if (record_pressed) {
-    if (btn_record.long_press_triggered) {
-      // Long press: Stop recording
-      if (audio_is_recording()) {
-        Serial.println("> Button: Stop recording (long press)");
-        audio_stop_recording();
-        Serial.print("✓ Recording stopped: "); 
-        Serial.print(audio_get_last_filename());
-        Serial.print(" ("); Serial.print(audio_get_bytes_recorded()); Serial.print(" bytes, ");
-        Serial.print(audio_get_buffer_overruns()); Serial.println(" overruns)");
-        
-        // Auto-start BLE transfer after stopping recording
-        const char* path = audio_get_last_filename();
-        if (*path) {
-          if (txFile.isOpen()) txFile.close();
-          
-          SdFs* sd = audio_get_sd_instance();
-          if (txFile.open(sd, path, O_READ)){
-            Serial.print("✓ Auto-starting BLE transfer: "); 
-            Serial.print(path); Serial.print(" (");
-            Serial.print(txFile.fileSize()); Serial.println(" bytes)");
-            ble_set_transfer_file(&txFile, (uint32_t)txFile.fileSize(), path);
-            ble_start_advertising();
-            Serial.println("  Waiting for BLE connection...");
+    if (record_pressed && !btn_record.long_press_triggered) {
+      // Smart mode detection: streaming if connected, recording if not
+      if (ble_streaming_is_connected()) {
+        // Live mode - toggle streaming
+        if (audio_is_streaming()) {
+          Serial.println("> Button: Stop live streaming");
+          audio_stop_streaming();
+          Serial.println("✓ Live streaming stopped");
+        } else {
+          Serial.println("> Button: Start live streaming");
+          if (audio_start_streaming()) {
+            Serial.println("✓ Live streaming started - real-time transcription active");
           } else {
-            Serial.println("✗ Failed to open file for transfer");
-            current_led_status = LED_ERROR;
+            Serial.println("✗ Failed to start streaming");
           }
-        } else {
-          Serial.println("✗ No file to transfer");
-          current_led_status = LED_ERROR;
         }
       } else {
-        Serial.println("> Button: Not recording");
-      }
-    } else {
-      // Short press: Start recording
-      if (!audio_is_recording()) {
-        Serial.println("> Button: Start recording (short press)");
-        if (audio_start_recording()){
-          Serial.print("✓ Recording started: "); 
-          Serial.println(audio_get_last_filename());
+        // Offline mode - toggle recording
+        if (audio_is_recording()) {
+          Serial.println("> Button: Stop offline recording");
+          audio_stop_recording();
+          Serial.print("✓ Offline recording stopped: "); 
+          Serial.print(audio_get_last_filename());
+          Serial.print(" ("); Serial.print(audio_get_bytes_recorded()); Serial.println(" bytes)");
         } else {
-          Serial.println("✗ Recording start failed");
-          current_led_status = LED_ERROR;
+          Serial.println("> Button: Start offline recording");
+          if (audio_start_recording()) {
+            Serial.print("✓ Offline recording started: "); 
+            Serial.println(audio_get_last_filename());
+          } else {
+            Serial.println("✗ Recording start failed");
+          }
         }
-      } else {
-        Serial.println("> Button: Already recording (hold to stop)");
       }
     }
     Serial.println();
     Serial.flush();
   }
   
-  // Handle BLE transfer button (D1 - hold 2s)
-  bool transfer_pressed = update_button_state(&btn_transfer, BTN_TRANSFER_PIN);
+  // Single-button operation - other buttons disabled for simplicity
+  // (File management handled through the app)
   
-  if (transfer_pressed) {
-    if (btn_transfer.long_press_triggered) {
-      // D1: Start BLE transfer (only works when not recording)
-      if (audio_is_recording()) {
-        Serial.println("> Button: Stop recording first! Cannot transfer while recording.");
-      } else {
-        Serial.println("> Button: Starting BLE transfer (2s hold)...");
-        const char* path = audio_get_last_filename();
-        if (!*path) { 
-          Serial.println("✗ No file to transfer");
-          current_led_status = LED_ERROR;
-        } else {
-          if (txFile.isOpen()) txFile.close();
-          
-          SdFs* sd = audio_get_sd_instance();
-          if (txFile.open(sd, path, O_READ)){
-            Serial.print("✓ BLE advertising: "); 
-            Serial.print(path); Serial.print(" (");
-            Serial.print(txFile.fileSize()); Serial.println(" bytes)");
-            ble_set_transfer_file(&txFile, (uint32_t)txFile.fileSize(), path);
-            ble_start_advertising();
-            Serial.println("  Waiting for BLE connection...");
-          } else {
-            Serial.println("✗ Failed to open file for transfer");
-            current_led_status = LED_ERROR;
-          }
-        }
-      }
-      Serial.println();
-      Serial.flush();
-    }
-  }
-  
-  // Handle file management button
-  bool files_pressed = update_button_state(&btn_files, BTN_FILES_PIN);
-  
-  if (files_pressed) {
-    if (btn_files.long_press_triggered) {
-      // D2 long press: Delete all WAV files
-      Serial.println("> Button: Delete all WAV files (2s hold)...");
-      SdFs* sd = audio_get_sd_instance();
-      FsFile dir, ent;
-      if (dir.open(sd, "/", O_RDONLY)) {
-        int deleteCount = 0;
-        while (ent.openNext(&dir, O_RDONLY)){
-          char n[64]; 
-          ent.getName(n, sizeof(n));
-          if (strstr(n, ".WAV") || strstr(n, ".wav")){
-            ent.close();
-            if (sd->remove(n)) {
-              Serial.print("  Deleted ");
-              Serial.println(n);
-              deleteCount++;
-            } else {
-              Serial.print("  Failed to delete ");
-              Serial.println(n);
-            }
-          } else {
-            ent.close();
-          }
-        }
-        dir.close();
-        Serial.print("Deleted ");
-        Serial.print(deleteCount);
-        Serial.println(" files");
-      } else {
-        Serial.println("✗ Failed to open SD card root directory");
-        current_led_status = LED_ERROR;
-      }
-    } else {
-      // D2 short press: List files
-      Serial.println("> Button: List files");
-      Serial.println("Files on SD card:");
-      SdFs* sd = audio_get_sd_instance();
-      FsFile dir, ent;
-      if (dir.open(sd, "/", O_RDONLY)) {
-        int fileCount = 0;
-        while (ent.openNext(&dir, O_RDONLY)){
-          char n[64]; ent.getName(n, sizeof(n));
-          if (strstr(n, ".WAV") || strstr(n, ".wav")){
-            Serial.print("  "); Serial.print(n);
-            Serial.print(" ("); Serial.print(ent.fileSize()); Serial.println(" bytes)");
-            fileCount++;
-          }
-          ent.close();
-        }
-        dir.close();
-        if (fileCount == 0) {
-          Serial.println("  No WAV files found");
-        }
-      } else {
-        Serial.println("✗ Failed to open SD card root directory");
-        current_led_status = LED_ERROR;
-      }
-    }
-    Serial.println();
-    Serial.flush();
-  }
-  
-  // serial commands
-  if (Serial.available()){
-    char cmd = Serial.read();
-    // Clear any remaining characters in buffer
-    while (Serial.available()) Serial.read();
-    
-    Serial.print("> Command: ");
-    Serial.println(cmd);
-    Serial.flush();
-    
-    if (cmd=='r' && !audio_is_recording()){
-      Serial.println("Starting recording...");
-      if (audio_start_recording()){
-        Serial.print("✓ Recording started: "); 
-        Serial.println(audio_get_last_filename());
-      } else {
-        Serial.println("✗ Recording start failed");
-      }
-    } else if (cmd=='s' && audio_is_recording()){
-      Serial.println("Stopping recording...");
-      audio_stop_recording();
-      Serial.print("✓ Recording stopped: "); 
-      Serial.print(audio_get_last_filename());
-      Serial.print(" ("); Serial.print(audio_get_bytes_recorded()); Serial.print(" bytes, ");
-      Serial.print(audio_get_buffer_overruns()); Serial.println(" overruns)");
-      
-      // Auto-start BLE transfer after stopping recording
-      const char* path = audio_get_last_filename();
-      if (*path) {
-        if (txFile.isOpen()) txFile.close();
-        
-        SdFs* sd = audio_get_sd_instance();
-        if (txFile.open(sd, path, O_READ)){
-          Serial.print("✓ Auto-starting BLE transfer: "); 
-          Serial.print(path); Serial.print(" (");
-          Serial.print(txFile.fileSize()); Serial.println(" bytes)");
-          ble_set_transfer_file(&txFile, (uint32_t)txFile.fileSize(), path);
-          ble_start_advertising();
-          Serial.println("  Waiting for BLE connection...");
-        } else {
-          Serial.println("✗ Failed to open file for transfer");
-        }
-      } else {
-        Serial.println("✗ No file to transfer");
-      }
-    } else if (cmd=='c' && !audio_is_recording()){
-      Serial.println("Starting BLE transfer...");
-      const char* path = audio_get_last_filename();
-      if (!*path) { 
-        Serial.println("✗ No file to transfer"); 
-      } else {
-        if (txFile.isOpen()) txFile.close();
-        
-        // Use the SD instance from audio module
-        SdFs* sd = audio_get_sd_instance();
-        if (txFile.open(sd, path, O_READ)){
-          Serial.print("✓ BLE advertising: "); 
-          Serial.print(path); Serial.print(" (");
-          Serial.print(txFile.fileSize()); Serial.println(" bytes)");
-          ble_set_transfer_file(&txFile, (uint32_t)txFile.fileSize(), path);
-          ble_start_advertising();
-          Serial.println("  Waiting for BLE connection...");
-        } else {
-          Serial.println("✗ Failed to open file");
-        }
-      }
-    } else if (cmd=='l'){
-      Serial.println("Files on SD card:");
-      SdFs* sd = audio_get_sd_instance();
-      FsFile dir, ent;
-      if (dir.open(sd, "/", O_RDONLY)) {
-        int fileCount = 0;
-        while (ent.openNext(&dir, O_RDONLY)){
-          char n[64]; ent.getName(n, sizeof(n));
-          if (strstr(n, ".WAV") || strstr(n, ".wav")){
-            Serial.print("  "); Serial.print(n);
-            Serial.print(" ("); Serial.print(ent.fileSize()); Serial.println(" bytes)");
-            fileCount++;
-          }
-          ent.close();
-        }
-        dir.close();
-        if (fileCount == 0) {
-          Serial.println("  No WAV files found");
-        }
-      } else {
-        Serial.println("✗ Failed to open SD card root directory");
-      }
-    } else if (cmd == 'd') {
-      Serial.println("Deleting all WAV files...");
-      SdFs* sd = audio_get_sd_instance();
-      FsFile dir, ent;
-      if (dir.open(sd, "/", O_RDONLY)) {
-        int deleteCount = 0;
-        while (ent.openNext(&dir, O_RDONLY)){
-          char n[64]; 
-          ent.getName(n, sizeof(n));
-          if (strstr(n, ".WAV") || strstr(n, ".wav")){
-            ent.close();
-            if (sd->remove(n)) {
-              Serial.print("  Deleted ");
-              Serial.println(n);
-              deleteCount++;
-            } else {
-              Serial.print("  Failed to delete ");
-              Serial.println(n);
-            }
-          } else {
-            ent.close();
-          }
-        }
-        dir.close();
-        Serial.print("Deleted ");
-        Serial.print(deleteCount);
-        Serial.println(" files");
-      } else {
-        Serial.println("✗ Failed to open SD card root directory");
-      }
-    } else if (cmd == 'r' && audio_is_recording()) {
-      Serial.println("✗ Already recording! Use 's' to stop first.");
-    } else if (cmd == 's' && !audio_is_recording()) {
-      Serial.println("✗ Not currently recording! Use 'r' to start.");
-    } else if (cmd == 'c' && audio_is_recording()) {
-      Serial.println("✗ Stop recording first! Use 's' to stop.");
-    } else if (cmd == 't' && ENABLE_LIVE_STREAMING) {
-      // Toggle streaming
-      if (audio_is_streaming()) {
-        Serial.println("Stopping live streaming...");
-        audio_stop_streaming();
-      } else {
-        Serial.println("Starting live streaming...");
-        if (audio_start_streaming()) {
-          Serial.println("✓ Live streaming started");
-          if (!ble_streaming_is_connected()) {
-            Serial.println("  No BLE client connected - connect with streaming client");
-          }
-        } else {
-          Serial.println("✗ Failed to start streaming");
-        }
-      }
-    } else {
-      Serial.println("✗ Unknown command or invalid state");
-      String available_commands = "Available commands: r=record, s=stop, c=BLE transfer, l=list files, d=delete all";
-      if (ENABLE_LIVE_STREAMING) {
-        available_commands += ", t=toggle streaming";
-      }
-      Serial.println(available_commands);
-    }
-    Serial.println();
-    Serial.flush();
-  }
-
   // Process audio data and BLE operations
   audio_process();
   ble_process_transfer();
