@@ -331,6 +331,7 @@ static bool create_audio_file() {
             case 17: Serial.print("Card ECC Failed"); break;
             case 18: Serial.print("Card Controller Error"); break;
             case 19: Serial.print("General/Unknown Error"); break;
+            case 28: Serial.print("Write Protected or File System Error"); break;
             default: Serial.print("Unknown error code");
         }
         Serial.println(")");

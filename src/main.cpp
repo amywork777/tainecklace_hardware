@@ -118,12 +118,46 @@ void format_sd_card() {
   // Wait a moment for user to see the warning
   delay(2000);
   
+  // Try multiple format approaches
+  bool format_success = false;
+  
+  // Approach 1: Standard format
+  Serial.println("🔄 Attempting standard format...");
   if (audio_get_sd_card().format()) {
-    Serial.println("✅ SD card formatted successfully");
-    Serial.println("💾 SD card is now ready for use");
+    format_success = true;
+    Serial.println("✅ Standard format successful");
   } else {
-    Serial.println("❌ SD card format failed");
-    Serial.println("💡 Try removing and reinserting the SD card");
+    Serial.println("❌ Standard format failed, trying alternative...");
+    
+    // Approach 2: Reinitialize and format
+    Serial.println("🔄 Reinitializing SD card...");
+    delay(500);
+    
+    // Try to reinitialize with different settings
+    if (audio_get_sd_card().begin(SdSpiConfig(SD_CS_PIN, SHARED_SPI, SD_SCK_MHZ(1)))) {
+      Serial.println("🔄 Attempting format after reinit...");
+      if (audio_get_sd_card().format()) {
+        format_success = true;
+        Serial.println("✅ Format after reinit successful");
+      }
+    }
+  }
+  
+  if (format_success) {
+    // Verify the format worked
+    delay(1000);
+    uint64_t free_space = audio_get_sd_card().freeClusterCount() * audio_get_sd_card().sectorsPerCluster() * 512UL;
+    Serial.print("💾 SD card ready - Free space: ");
+    Serial.print(free_space);
+    Serial.println(" bytes");
+    
+    if (free_space == 0) {
+      Serial.println("⚠️  Warning: Free space shows 0 - SD card may need computer format");
+    }
+  } else {
+    Serial.println("❌ All format attempts failed");
+    Serial.println("💡 Remove SD card and format on computer (FAT32)");
+    Serial.println("💡 Or try a different SD card");
   }
 }
 
@@ -313,14 +347,14 @@ void loop(){
   bool cleanup_pressed = update_button_state(&btn_cleanup, BTN_CLEANUP_PIN);
   
   // Handle D0 long press - SD card FORMAT (fixes addressing errors)
-  if (btn_record.long_press_triggered) {
+    if (btn_record.long_press_triggered) {
     btn_record.long_press_triggered = false;  // Reset flag
     Serial.println("> Button: LONG PRESS D0 - SD card FORMAT requested");
     
     // Stop any ongoing operations first
-    if (audio_is_recording()) {
+      if (audio_is_recording()) {
       Serial.println("⏹️  Stopping recording before format...");
-      audio_stop_recording();
+        audio_stop_recording();
       delay(100);
     }
     
