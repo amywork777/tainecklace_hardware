@@ -316,10 +316,30 @@ static bool create_audio_file() {
         g_audio_file.close();
     }
     
-    // Create new file
+    // Create new file with better error diagnostics
     if (!g_audio_file.open(g_current_filename, O_WRITE | O_CREAT | O_TRUNC)) {
+        uint8_t error_code = g_sd_card.sdErrorCode();
         Serial.print("ERROR: Failed to create file: ");
-        Serial.println(g_sd_card.sdErrorCode());
+        Serial.print(error_code);
+        Serial.print(" (");
+        switch(error_code) {
+            case 12: Serial.print("Address Error - SD card addressing issue"); break;
+            case 13: Serial.print("Parameter Error - Invalid parameter or write protected"); break;
+            case 14: Serial.print("Card Write Protected"); break;
+            case 15: Serial.print("Card Locked"); break;
+            case 16: Serial.print("Write Error - General write failure"); break;
+            case 17: Serial.print("Card ECC Failed"); break;
+            case 18: Serial.print("Card Controller Error"); break;
+            case 19: Serial.print("General/Unknown Error"); break;
+            default: Serial.print("Unknown error code");
+        }
+        Serial.println(")");
+        
+        // Additional diagnostics
+        Serial.print("Free space: ");
+        Serial.print(g_sd_card.freeClusterCount() * g_sd_card.sectorsPerCluster() * 512UL);
+        Serial.println(" bytes");
+        
         return false;
     }
     
@@ -455,14 +475,47 @@ static bool finalize_audio_file() {
 bool audio_init() {
     Serial.println("Initializing audio system...");
     
-    // Initialize SD card
+    // Initialize SD card with multiple attempts and different configurations
     Serial.print("Initializing SD card on CS pin ");
     Serial.print(SD_CS_PIN);
     Serial.println("...");
     
-    if (!g_sd_card.begin(SdSpiConfig(SD_CS_PIN, SHARED_SPI, SD_SCK_MHZ(SD_SPEED_MHZ)))) {
-        Serial.print("ERROR: SD card initialization failed! Error code: ");
+    // Try different SD card configurations for better compatibility
+    bool sd_initialized = false;
+    
+    // First attempt: Low speed, shared SPI
+    Serial.println("Attempt 1: Low speed (4 MHz)...");
+    if (g_sd_card.begin(SdSpiConfig(SD_CS_PIN, SHARED_SPI, SD_SCK_MHZ(4)))) {
+        sd_initialized = true;
+        Serial.println("✓ SD card initialized at 4 MHz");
+    }
+    
+    // Second attempt: Even lower speed
+    if (!sd_initialized) {
+        Serial.println("Attempt 2: Ultra low speed (1 MHz)...");
+        if (g_sd_card.begin(SdSpiConfig(SD_CS_PIN, SHARED_SPI, SD_SCK_MHZ(1)))) {
+            sd_initialized = true;
+            Serial.println("✓ SD card initialized at 1 MHz");
+        }
+    }
+    
+    // Third attempt: Default SPI settings
+    if (!sd_initialized) {
+        Serial.println("Attempt 3: Default settings...");
+        if (g_sd_card.begin(SD_CS_PIN)) {
+            sd_initialized = true;
+            Serial.println("✓ SD card initialized with default settings");
+        }
+    }
+    
+    if (!sd_initialized) {
+        Serial.print("ERROR: All SD card initialization attempts failed! Last error code: ");
         Serial.println(g_sd_card.card()->errorCode());
+        Serial.println("Please check:");
+        Serial.println("- SD card is properly inserted");
+        Serial.println("- SD card is FAT16/FAT32 formatted");
+        Serial.println("- SD card is 32GB or smaller");
+        Serial.println("- Connections are secure");
         return false;
     }
     
@@ -610,6 +663,11 @@ const char* audio_get_last_filename() {
 
 uint32_t audio_get_bytes_recorded() {
     return g_total_bytes_recorded;
+}
+
+// SD card access for cleanup functionality
+SdFat& audio_get_sd_card() {
+    return g_sd_card;
 }
 
 uint32_t audio_get_buffer_overruns() {

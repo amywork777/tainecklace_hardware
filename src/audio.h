@@ -25,6 +25,9 @@ bool audio_start_streaming();         // Start live audio streaming
 void audio_stop_streaming();          // Stop live audio streaming
 bool audio_is_streaming();            // Check if currently streaming
 
+// SD card access for cleanup functionality
+extern SdFat& audio_get_sd_card();
+
 // Status and information
 bool audio_is_recording();            // Check if currently recording
 const char* audio_get_last_filename(); // Get last recorded filename

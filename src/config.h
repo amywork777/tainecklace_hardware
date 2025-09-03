@@ -32,7 +32,7 @@ static_assert((RING_BUFFER_SIZE & (RING_BUFFER_SIZE - 1)) == 0, "Ring buffer siz
 
 // -------- SD Card Configuration --------
 constexpr int SD_CS_PIN = 6;    // XIAO Sense CS pin
-constexpr int SD_SPEED_MHZ = 25; // SD card speed (try 40 if stable)
+constexpr int SD_SPEED_MHZ = 4;  // Reduced speed for reliability (was 25)
 
 // File pre-allocation (16MB for ~8.5 hours of 16kHz mono PCM)
 constexpr uint32_t PREALLOC_SIZE_MB = 16;
