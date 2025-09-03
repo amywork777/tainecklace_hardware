@@ -316,10 +316,49 @@ static bool create_audio_file() {
         g_audio_file.close();
     }
     
-    // Create new file with better error diagnostics
-    if (!g_audio_file.open(g_current_filename, O_WRITE | O_CREAT | O_TRUNC)) {
-        uint8_t error_code = g_sd_card.sdErrorCode();
-        Serial.print("ERROR: Failed to create file: ");
+    // Create new file with multiple attempts and better error diagnostics
+    bool file_created = false;
+    uint8_t error_code = 0;
+    
+    // Attempt 1: Standard file creation
+    if (g_audio_file.open(g_current_filename, O_WRITE | O_CREAT | O_TRUNC)) {
+        file_created = true;
+    } else {
+        error_code = g_sd_card.sdErrorCode();
+        Serial.print("⚠️  First file creation attempt failed (Error ");
+        Serial.print(error_code);
+        Serial.println("), trying alternatives...");
+        
+        // Attempt 2: Try different file flags
+        if (g_audio_file.open(g_current_filename, O_WRITE | O_CREAT)) {
+            file_created = true;
+            Serial.println("✅ File created with alternative flags");
+        } else {
+            // Attempt 3: Try creating in root directory with simpler name
+            char simple_name[32];
+            snprintf(simple_name, sizeof(simple_name), "REC%04lu.ADP", (unsigned long)g_file_counter);
+            
+            if (g_audio_file.open(simple_name, O_WRITE | O_CREAT | O_TRUNC)) {
+                file_created = true;
+                strncpy(g_current_filename, simple_name, sizeof(g_current_filename));
+                Serial.print("✅ File created with simple name: ");
+                Serial.println(simple_name);
+            } else {
+                // Attempt 4: Force sync and try again
+                // Note: SdFat sync is automatic, just add a delay for SD card stabilization
+                delay(200);
+                
+                if (g_audio_file.open(g_current_filename, O_WRITE | O_CREAT | O_TRUNC)) {
+                    file_created = true;
+                    Serial.println("✅ File created after sync");
+                }
+            }
+        }
+    }
+    
+    if (!file_created) {
+        error_code = g_sd_card.sdErrorCode();
+        Serial.print("ERROR: All file creation attempts failed: ");
         Serial.print(error_code);
         Serial.print(" (");
         switch(error_code) {
@@ -340,6 +379,12 @@ static bool create_audio_file() {
         Serial.print("Free space: ");
         Serial.print(g_sd_card.freeClusterCount() * g_sd_card.sectorsPerCluster() * 512UL);
         Serial.println(" bytes");
+        
+        // Check if SD card is write protected
+        Serial.println("💡 Possible solutions:");
+        Serial.println("   - Check SD card write-protect switch (slide to unlock)");
+        Serial.println("   - Try formatting SD card on computer (FAT32)");
+        Serial.println("   - Try a different SD card");
         
         return false;
     }
